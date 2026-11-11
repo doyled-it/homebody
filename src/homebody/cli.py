@@ -1,0 +1,168 @@
+"""Command-line entry point for homebody.
+
+With no subcommand it prints the version and the controller URL so an install
+can confirm the app is wired up. The ``matter`` subcommands drive the Matter
+controller for the first-task proof: commission the Nest with a sharing code,
+read its live mode, temperature, and setpoint, and write the setpoint or mode.
+
+Later tasks add the presence and decision subcommands; this keeps the same
+argparse shape.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import os
+import sys
+from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager
+from typing import Any
+
+from homebody import __version__, matter
+
+# A connect factory turns a controller URL into an async context manager that
+# yields a MatterConnection. The default opens a real WebSocket; tests inject a
+# factory that yields an in-memory fake controller.
+ConnectFactory = Callable[[str], AbstractAsyncContextManager[Any]]
+
+
+def _matter_url() -> str:
+    """The controller WebSocket URL: the env override, else the loopback default."""
+    return os.environ.get("HOMEBODY_MATTER_URL", matter.DEFAULT_MATTER_URL)
+
+
+def _default_connect(url: str) -> AbstractAsyncContextManager[Any]:
+    return matter.WebSocketConnection(url)
+
+
+def main(
+    argv: list[str] | None = None, *, connect: ConnectFactory | None = None
+) -> int:
+    parser = argparse.ArgumentParser(
+        prog="homebody",
+        description="Presence-based climate control over Matter.",
+    )
+    parser.add_argument("--version", action="version", version=__version__)
+    subparsers = parser.add_subparsers(dest="command")
+    _add_matter(subparsers)
+
+    args = parser.parse_args(argv)
+
+    if args.command == "matter":
+        return _run_matter(args, connect or _default_connect)
+
+    print(f"homebody {__version__}: controller {_matter_url()}")
+    return 0
+
+
+def _add_matter(subparsers: argparse._SubParsersAction) -> None:
+    matter_cmd = subparsers.add_parser(
+        "matter", help="talk to the Matter controller and the thermostat"
+    )
+    actions = matter_cmd.add_subparsers(dest="action", required=True)
+
+    actions.add_parser(
+        "status", help="print the thermostat's mode, temperature, and setpoint"
+    )
+
+    commission = actions.add_parser(
+        "commission", help="commission a device with a QR or manual pairing code"
+    )
+    commission.add_argument("code", help="the Matter pairing or sharing code")
+
+    set_setpoint = actions.add_parser(
+        "set-setpoint", help="write the occupied cooling setpoint, in Fahrenheit"
+    )
+    set_setpoint.add_argument("fahrenheit", type=float, help="the setpoint in F")
+
+    set_mode = actions.add_parser(
+        "set-mode", help="write the thermostat's system mode"
+    )
+    set_mode.add_argument(
+        "mode",
+        choices=sorted(name for name in matter.SYSTEM_MODE_NAMES.values()),
+        help="the system mode to set",
+    )
+
+
+def _run_matter(args: argparse.Namespace, connect: ConnectFactory) -> int:
+    try:
+        return asyncio.run(_dispatch_matter(args, connect))
+    except matter.MatterError as error:
+        print(f"matter error: {error}", file=sys.stderr)
+        return 1
+
+
+async def _dispatch_matter(args: argparse.Namespace, connect: ConnectFactory) -> int:
+    url = _matter_url()
+    async with connect(url) as connection:
+        client = matter.MatterClient(connection)
+        if args.action == "status":
+            return await _status(client)
+        if args.action == "commission":
+            return await _commission(client, args.code)
+        if args.action == "set-setpoint":
+            return await _set_setpoint(client, args.fahrenheit)
+        if args.action == "set-mode":
+            return await _set_mode(client, args.mode)
+    return 1
+
+
+async def _resolve_thermostat(client: matter.MatterClient) -> tuple[int, int] | None:
+    nodes = await client.get_nodes()
+    return matter.find_thermostat(nodes)
+
+
+async def _status(client: matter.MatterClient) -> int:
+    found = await _resolve_thermostat(client)
+    if found is None:
+        print("no thermostat commissioned", file=sys.stderr)
+        return 1
+    node_id, endpoint = found
+    state = await client.read_thermostat(node_id, endpoint=endpoint)
+    print(
+        f"thermostat node {node_id}: mode {state.system_mode_name}, "
+        f"now {_format_f(state.local_temperature_f)}, "
+        f"cooling setpoint {_format_f(state.cooling_setpoint_f)}"
+    )
+    return 0
+
+
+async def _commission(client: matter.MatterClient, code: str) -> int:
+    node = await client.commission(code)
+    print(f"commissioned node {node['node_id']}")
+    return 0
+
+
+async def _set_setpoint(client: matter.MatterClient, fahrenheit: float) -> int:
+    found = await _resolve_thermostat(client)
+    if found is None:
+        print("no thermostat commissioned", file=sys.stderr)
+        return 1
+    node_id, endpoint = found
+    await client.set_cooling_setpoint_f(node_id, fahrenheit, endpoint=endpoint)
+    print(f"cooling setpoint set to {_format_f(fahrenheit)}")
+    return 0
+
+
+async def _set_mode(client: matter.MatterClient, mode_name: str) -> int:
+    found = await _resolve_thermostat(client)
+    if found is None:
+        print("no thermostat commissioned", file=sys.stderr)
+        return 1
+    node_id, endpoint = found
+    mode = next(
+        value for value, name in matter.SYSTEM_MODE_NAMES.items() if name == mode_name
+    )
+    await client.set_system_mode(node_id, mode, endpoint=endpoint)
+    print(f"system mode set to {mode_name}")
+    return 0
+
+
+def _format_f(value: float | None) -> str:
+    return "unknown" if value is None else f"{value:.1f}F"
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
