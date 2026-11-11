@@ -17,14 +17,15 @@ controller) and, in a later task, `homebody` (the presence-and-decision daemon).
 
 ## Commands
 
-The project uses [uv](https://docs.astral.sh/uv/). Python 3.12+.
+The project uses [uv](https://docs.astral.sh/uv/). Python 3.12+, pinned to 3.12 by
+`.python-version` (see below).
 
 - `uv sync` installs dependencies into `.venv`.
 - `uv run pytest` runs the test suite.
 - `uv run ruff check` lints. Add `--fix` to apply safe fixes.
 - `uv run homebody` runs the CLI entry point.
 
-CI runs `uv sync`, `uv run ruff check`, `shellcheck deploy/*.sh`, and
+CI runs `uv python install` (which reads `.python-version`), `uv sync --frozen`, `uv run ruff check`, `shellcheck deploy/*.sh`, and
 `uv run pytest` on every push and pull request. Keep all four green.
 
 ## Layout
@@ -66,6 +67,15 @@ keep the tests on the fake controller.
 Thermostat values: Matter temperatures are signed int16 in hundredths of a
 degree Celsius, so 72 F is 2222 and 82 F is 2778. `matter.py` has the conversions
 and the Thermostat cluster (0x0201) constants.
+
+## The Python pin
+
+`.python-version` pins uv to 3.12. Without it, uv on a host whose system Python is
+older than `requires-python` allows picks the newest managed Python, which once
+was a release where aiohttp (via python-matter-server) has no wheels, so the hub
+venv stayed empty. CI installs the same pin, and `tests/test_python_pin.py` fails
+if the pin is missing or CI selects a different Python. Move the pin and CI
+together, after checking that the dependencies publish wheels for the new series.
 
 ## Deployment and self-update
 
