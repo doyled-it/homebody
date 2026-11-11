@@ -1,0 +1,42 @@
+[project]
+name = "homebody"
+version = "0.1.0"
+description = "Presence-based air-conditioning control for a Google Nest thermostat over Matter, decided from the house's own network."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "websockets>=13",
+    # The open-source Matter controller. homebody never imports it; it only
+    # provides the `matter-server` daemon that homebody talks to over its local
+    # WebSocket API. The server extra pulls the CHIP SDK (home-assistant-chip-core),
+    # whose compiled wheels exist for Linux (the hub) and macOS arm64 but not
+    # macOS x86_64 or Windows, so the dependency is gated to Linux. On a dev
+    # machine homebody runs and its tests pass against a fake controller without
+    # it. See AGENTS.md ("The Matter controller").
+    "python-matter-server[server]>=8.1 ; sys_platform == 'linux'",
+]
+
+[project.scripts]
+homebody = "homebody.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/homebody"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B"]
