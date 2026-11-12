@@ -16,13 +16,18 @@ url = "ws://127.0.0.1:5580/ws"
 # status` discovers the thermostat node on its own until this is set.
 node_id = 0
 
-# The sections below are read by later tasks (presence and the decision loop).
-# They are shown here so the seeded local config is complete; Task 1 does not use
-# them. Keep real addresses and names out of this example file.
+# Presence and climate, read by homebody (src/homebody/config.py). Keep real
+# addresses and names out of this example file.
+#
+# [bluetooth]
+# # The hub's Bluetooth receive adapter: the one the owner's phone is paired with
+# # (the same adapter snaphouse uses for audio). Used only for the l2ping
+# # fallback. Leave it out to let l2ping pick the default adapter.
+# adapter = "<hub-bluetooth-adapter-address>"
 #
 # [[person]]
 # name = "Person A"            # a display name, not a real name, in this example
-# enabled = true
+# enabled = true               # false = configured but never probed, never counted
 # wifi_mac = "<phone-wifi-hardware-address>"   # the fixed private address for this LAN
 # bluetooth_mac = "<phone-bluetooth-address>"  # optional, for the fallback probe
 #
