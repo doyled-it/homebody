@@ -28,6 +28,8 @@ class Person:
     enabled: bool
     wifi_mac: str | None
     bluetooth_mac: str | None = None
+    # An opaque slug for the API and the web page; never a name or an address.
+    id: str = ""
 
 
 @dataclass(frozen=True)
@@ -63,7 +65,10 @@ def _person(raw: dict[str, Any], index: int) -> Person:
     enabled = raw.get("enabled", True)
     if not isinstance(enabled, bool):
         raise ConfigError(f"{where}: enabled must be true or false")
-    return Person(name.strip(), enabled, wifi, bluetooth)
+    pid = raw.get("id", f"person-{index + 1}")
+    if not isinstance(pid, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,31}", pid):
+        raise ConfigError(f"{where}: id must be a short lowercase slug")
+    return Person(name.strip(), enabled, wifi, bluetooth, pid)
 
 
 def _int(value: Any, key: str, default: int) -> int:

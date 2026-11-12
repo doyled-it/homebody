@@ -47,6 +47,7 @@ class BluetoothProbe(Protocol):
 
 @dataclass(frozen=True)
 class PersonStatus:
+    id: str
     name: str
     state: str
     signal: str | None
@@ -61,6 +62,7 @@ class _Tracked:
         self.last_signal: str | None = None
         self.last_bt_attempt: float | None = None
         self.started = started
+        self.enabled = person.enabled
 
 
 class PresenceTracker:
@@ -78,8 +80,9 @@ class PresenceTracker:
         self._clock = clock
         self._window = away_window
         self._started = clock()
-        # Disabled people are dropped here, so no later code can probe them.
-        self._tracked = [_Tracked(p, self._started) for p in people if p.enabled]
+        # Every configured person is tracked; `enabled` starts from the config
+        # default and can be flipped at runtime (the web page toggles it).
+        self._tracked = [_Tracked(p, self._started) for p in people]
         self._last_wifi_poll: float | None = None
 
     def poll(self) -> None:
@@ -91,7 +94,7 @@ class PresenceTracker:
         )
         if wifi_due:
             self._last_wifi_poll = now
-        for t in self._tracked:
+        for t in self._active():
             if wifi_due and t.person.wifi_mac and self._probe_wifi(t.person.wifi_mac):
                 t.last_seen = t.last_wifi_seen = now
                 t.last_signal = "wifi"
@@ -100,6 +103,28 @@ class PresenceTracker:
                 if self._probe_bluetooth(t.person.bluetooth_mac):
                     t.last_seen = now
                     t.last_signal = "bluetooth"
+
+    def _active(self) -> list[_Tracked]:
+        return [t for t in self._tracked if t.enabled]
+
+    def set_enabled(self, person_id: str, enabled: bool) -> bool:
+        """Turn a person on or off at runtime. Returns False for an unknown id.
+
+        Off: never probed again and ignored by occupancy at once. On: observed
+        afresh, so they are unknown (not away) until seen or a full window passes.
+        """
+        for t in self._tracked:
+            if t.person.id == person_id:
+                if enabled and not t.enabled:
+                    t.started = self._clock()
+                    t.last_seen = t.last_wifi_seen = None
+                    t.last_signal = t.last_bt_attempt = None
+                t.enabled = enabled
+                return True
+        return False
+
+    def enabled_flags(self) -> dict[str, bool]:
+        return {t.person.id: t.enabled for t in self._tracked}
 
     def _bluetooth_due(self, t: _Tracked, now: float) -> bool:
         if not t.person.bluetooth_mac:
@@ -138,6 +163,7 @@ class PresenceTracker:
         now = self._clock()
         return [
             PersonStatus(
+                id=t.person.id,
                 name=t.person.name,
                 state=self._state(t, now),
                 signal=t.last_signal if t.last_seen is not None else None,
@@ -145,7 +171,7 @@ class PresenceTracker:
                     now - t.last_seen if t.last_seen is not None else None
                 ),
             )
-            for t in self._tracked
+            for t in self._active()
         ]
 
     def occupied(self) -> bool | None:

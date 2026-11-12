@@ -26,6 +26,7 @@ node_id = 0
 # adapter = "<hub-bluetooth-adapter-address>"
 #
 # [[person]]
+# id = "person-a"            # opaque slug used by the API and page (default person-N)
 # name = "Person A"            # a display name, not a real name, in this example
 # enabled = true               # false = configured but never probed, never counted
 # wifi_mac = "<phone-wifi-hardware-address>"   # the fixed private address for this LAN

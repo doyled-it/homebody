@@ -81,3 +81,16 @@ def test_load_missing_file_is_a_config_error(tmp_path):
 def test_enabled_people_excludes_disabled():
     cfg = config.parse(EXAMPLE)
     assert [p.name for p in cfg.enabled_people] == ["Person A"]
+
+
+def test_person_ids_are_opaque_slugs_by_default_or_from_config():
+    cfg = config.parse(EXAMPLE)
+    assert [p.id for p in cfg.people] == ["person-1", "person-2"]
+    named = config.parse(
+        '[[person]]\nid = "p-one"\nname = "X"\nwifi_mac = "aa:bb:cc:00:00:01"\n'
+    )
+    assert named.people[0].id == "p-one"
+    with pytest.raises(config.ConfigError):
+        config.parse(
+            '[[person]]\nid = "Bad Id"\nname = "X"\nwifi_mac = "aa:bb:cc:00:00:01"\n'
+        )

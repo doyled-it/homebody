@@ -46,9 +46,9 @@ class FakeBluetooth:
         return mac in self.visible
 
 
-A = Person("A", True, "aa:00:00:00:00:01", "bb:00:00:00:00:01")
-B = Person("B", False, "aa:00:00:00:00:02", "bb:00:00:00:00:02")
-C = Person("C", True, "aa:00:00:00:00:03", None)
+A = Person("A", True, "aa:00:00:00:00:01", "bb:00:00:00:00:01", "a")
+B = Person("B", False, "aa:00:00:00:00:02", "bb:00:00:00:00:02", "b")
+C = Person("C", True, "aa:00:00:00:00:03", None, "c")
 
 
 def make(people, clock=None):
@@ -238,6 +238,63 @@ def test_only_disabled_people_means_unknown_forever():
     for _ in range(30):
         step(tracker, clock)
     assert tracker.occupied() is None
+
+
+# Runtime enabled flag
+
+
+def test_person_disabled_at_runtime_stops_being_probed_and_counted():
+    tracker, wifi, bt, clock = make([A, C])
+    wifi.visible.update({A.wifi_mac, C.wifi_mac})
+    tracker.poll()
+    assert tracker.occupied() is True
+    assert tracker.set_enabled("a", False) is True
+    wifi.calls.clear()
+    bt.calls.clear()
+    wifi.visible.discard(C.wifi_mac)
+    for _ in range(30):
+        step(tracker, clock)
+    assert A.wifi_mac not in wifi.calls
+    assert A.bluetooth_mac not in bt.calls
+    assert [s.name for s in tracker.statuses()] == ["C"]
+    assert tracker.enabled_flags() == {"a": False, "c": True}
+    assert tracker.occupied() is False  # A's old sighting does not count
+
+
+def test_disabling_the_only_home_person_takes_effect_at_once():
+    tracker, wifi, _, _ = make([A])
+    wifi.visible.add(A.wifi_mac)
+    tracker.poll()
+    tracker.set_enabled("a", False)
+    assert tracker.occupied() is None
+
+
+def test_person_enabled_at_runtime_starts_unknown_then_is_probed():
+    tracker, wifi, _, clock = make([B])
+    for _ in range(30):
+        step(tracker, clock)
+    assert wifi.calls == []
+    assert tracker.set_enabled("b", True) is True
+    assert tracker.occupied() is None  # observed afresh, not "away"
+    wifi.visible.add(B.wifi_mac)
+    step(tracker, clock)
+    assert tracker.occupied() is True
+
+
+def test_enabling_again_forgets_the_old_sighting():
+    tracker, wifi, _, clock = make([A])
+    wifi.visible.add(A.wifi_mac)
+    tracker.poll()
+    tracker.set_enabled("a", False)
+    clock.advance(WINDOW + MIN)
+    wifi.visible.clear()
+    tracker.set_enabled("a", True)
+    assert state(tracker, "A").state == presence.UNKNOWN
+
+
+def test_set_enabled_unknown_id_is_false():
+    tracker, *_ = make([A])
+    assert tracker.set_enabled("nobody", True) is False
 
 
 # Boot (Review Focus 5)

@@ -79,7 +79,9 @@ runs one `l2ping` through the adapter from `[bluetooth] adapter` in the local
 config, only after 5 minutes without Wi-Fi and at most once a minute. A person is
 home for 20 minutes after the last sighting. After a restart presence is unknown,
 not away, until someone is seen or a full window has been watched. Disabled people
-are dropped before any probe runs.
+are skipped by every probe. `set_enabled(id, flag)` flips a person at runtime (the
+daemon persists the flag in its state and applies it over the local.toml default);
+off stops probing and counting at once, on restarts observation from unknown.
 
 Privilege: `arping` and `l2ping` open raw sockets, which need root or
 `CAP_NET_RAW`. The `homebody` service user is not root, so the systemd unit (owned
