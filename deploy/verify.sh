@@ -3,7 +3,8 @@
 # homebody verify: the health check install.sh and the snaphouse role run after
 # a sync. It exits 0 when the uv venv can import the homebody package and, when
 # the Matter controller service is active, when the controller's WebSocket
-# answers on the loopback port. It never commissions anything and never touches a
+# answers on the loopback port (retried until HOMEBODY_VERIFY_DEADLINE, default
+# 90 seconds, because a restarted controller is slow to listen). It never commissions anything and never touches a
 # household machine; it only confirms the code imports and the controller is up.
 #
 # The service is often not yet running on a brand-new install (it is commissioned
@@ -26,10 +27,16 @@ if ! "$py" -c "import homebody" >/dev/null 2>&1; then
   exit 1
 fi
 
-# 2. If the Matter controller is running, its WebSocket must answer. A fresh
-# install has no controller yet, so skip the probe unless the unit is active.
-if systemctl is-active --quiet "$service" 2>/dev/null; then
-  if ! "$py" - "$url" <<'PY'
+# 2. If the Matter controller is running or starting, its WebSocket must answer.
+# A fresh install has no controller yet, so skip the probe unless the unit is
+# active or activating. After a restart the controller fetches its PAA root
+# certificates before it listens (about 15 seconds on the hub), so retry the probe
+# until it answers or the deadline passes; only then is it a failure.
+deadline="${HOMEBODY_VERIFY_DEADLINE:-90}"
+interval="${HOMEBODY_VERIFY_INTERVAL:-2}"
+
+probe() {
+  "$py" - "$url" <<'PY'
 import asyncio
 import sys
 
@@ -45,10 +52,20 @@ async def probe(url: str) -> None:
 
 asyncio.run(probe(sys.argv[1]))
 PY
-  then
-    echo "verify: the Matter controller WebSocket did not answer at $url" >&2
-    exit 1
-  fi
-fi
+}
+
+state="$(systemctl is-active "$service" 2>/dev/null || true)"
+case "$state" in
+  active | activating)
+    start=$SECONDS
+    until probe >/dev/null 2>&1; do
+      if ((SECONDS - start >= deadline)); then
+        echo "verify: the Matter controller WebSocket did not answer at $url" >&2
+        exit 1
+      fi
+      sleep "$interval"
+    done
+    ;;
+esac
 
 echo "verify: ok"
