@@ -34,6 +34,8 @@ CI runs `uv python install` (which reads `.python-version`), `uv sync --frozen`,
 src/homebody/
   __init__.py   the version
   matter.py     the thin Matter controller client (WebSocket), unit conversions
+  config.py     reads /etc/homebody/local.toml into typed settings
+  presence.py   who is home: Wi-Fi and Bluetooth probes, the 20 minute window
   cli.py        the console entry point (homebody matter ...)
 deploy/
   install.sh    root installer: user, config, dirs, uv venv, verify, last-good
@@ -67,6 +69,27 @@ keep the tests on the fake controller.
 Thermostat values: Matter temperatures are signed int16 in hundredths of a
 degree Celsius, so 72 F is 2222 and 82 F is 2778. `matter.py` has the conversions
 and the Thermostat cluster (0x0201) constants.
+
+## Presence
+
+`presence.py` decides who is home from injected probes and an injected clock.
+Wi-Fi (`NeighbourWifiProbe`) reads `ip -4 neigh show` and confirms a non-REACHABLE
+entry with one `arping` of the last known IP. Bluetooth (`L2pingBluetoothProbe`)
+runs one `l2ping` through the adapter from `[bluetooth] adapter` in the local
+config, only after 5 minutes without Wi-Fi and at most once a minute. A person is
+home for 20 minutes after the last sighting. After a restart presence is unknown,
+not away, until someone is seen or a full window has been watched. Disabled people
+are skipped by every probe. `set_enabled(id, flag)` flips a person at runtime (the
+daemon persists the flag in its state and applies it over the local.toml default);
+off stops probing and counting at once, on restarts observation from unknown.
+
+Privilege: `arping` and `l2ping` open raw sockets, which need root or
+`CAP_NET_RAW`. The `homebody` service user is not root, so the systemd unit (owned
+by the snaphouse `homebody_bootstrap` role) must set `AmbientCapabilities=CAP_NET_RAW`
+and `CapabilityBoundingSet=CAP_NET_RAW`, and if it uses `RestrictAddressFamilies`
+allow `AF_INET AF_NETLINK AF_BLUETOOTH`. The hub also needs `iproute2`,
+`iputils-arping`, and `bluez` (for `l2ping`) installed. The unit lands with the
+daemon task; until then nothing runs these probes.
 
 ## The Python pin
 
