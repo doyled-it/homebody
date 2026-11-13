@@ -26,7 +26,7 @@ homebody runs on the snaphouse hub as two services:
 - `homebody-matter`: the open-source Matter controller
   ([`python-matter-server`](https://github.com/home-assistant/python-matter-server)),
   bound to loopback, that holds the Matter fabric and talks to the Nest.
-- `homebody`: the presence-and-decision daemon (later task) that watches the
+- `homebody`: the presence-and-decision daemon (`homebody run`) that watches the
   phones and sets the thermostat through the controller.
 
 snaphouse installs and self-updates homebody on the hub (a `homebody_bootstrap`
@@ -58,6 +58,24 @@ homebody matter set-mode <off|cool>    # write the system mode
 
 `homebody matter status` prints the thermostat's current system mode, local
 temperature, and occupied cooling setpoint, read live from the controller.
+
+```
+homebody run [--config PATH]           # the service loop (what the unit runs)
+```
+
+`homebody run` reads `/etc/homebody/local.toml` (or `--config`, or
+`HOMEBODY_CONFIG`) and loops until SIGTERM. Anyone home means Cool at the
+comfort setpoint; everyone gone for the away delay means Cool at the away
+setpoint. It acts once per home/away change, at most one command a minute, and
+leaves the thermostat alone after a hand change until the next home/away
+change. If the controller or thermostat is unreachable it keeps tracking
+presence and retries with backoff, then acts on the latest state only.
+
+It keeps a small state file, `state.json`, in the state directory
+(`/var/lib/homebody` unless `[daemon] state_dir` says otherwise): what it last
+set, the override flag, the last change and transition times, and any runtime
+enable flags. The file is replaced atomically, so a restart resumes where it
+left off and a damaged file just starts fresh.
 
 ## Deployment
 

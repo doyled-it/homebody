@@ -107,3 +107,25 @@ def test_matter_url_defaults_to_loopback_controller():
 def test_matter_url_honours_environment_override(monkeypatch):
     monkeypatch.setenv("HOMEBODY_MATTER_URL", "ws://127.0.0.1:9999/ws")
     assert cli._matter_url() == "ws://127.0.0.1:9999/ws"
+
+
+def test_run_loads_the_config_and_starts_the_daemon(tmp_path, monkeypatch):
+    path = tmp_path / "local.toml"
+    path.write_text('[daemon]\nstate_dir = "/tmp/hb-cli-test"\n')
+    started = []
+    monkeypatch.delenv("HOMEBODY_MATTER_URL", raising=False)
+
+    rc = cli.main(["run", "--config", str(path)], run_daemon=started.append)
+
+    assert rc == 0
+    assert len(started) == 1
+    assert str(started[0].state_dir) == "/tmp/hb-cli-test"
+
+
+def test_run_reports_a_missing_config(tmp_path, capsys):
+    rc = cli.main(
+        ["run", "--config", str(tmp_path / "missing.toml")],
+        run_daemon=lambda config: None,
+    )
+    assert rc == 1
+    assert "cannot read config" in capsys.readouterr().err

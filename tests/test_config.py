@@ -94,3 +94,23 @@ def test_person_ids_are_opaque_slugs_by_default_or_from_config():
         config.parse(
             '[[person]]\nid = "Bad Id"\nname = "X"\nwifi_mac = "aa:bb:cc:00:00:01"\n'
         )
+
+
+def test_daemon_settings_default_and_parse():
+    default = config.parse("")
+    assert default.matter_url == "ws://127.0.0.1:5580/ws"
+    assert default.matter_node_id == 0
+    assert str(default.state_dir) == "/var/lib/homebody"
+
+    custom = config.parse(
+        '[matter]\nurl = "ws://127.0.0.1:9/ws"\nnode_id = 7\n'
+        '[daemon]\nstate_dir = "/tmp/hb-state"\n'
+    )
+    assert custom.matter_url == "ws://127.0.0.1:9/ws"
+    assert custom.matter_node_id == 7
+    assert str(custom.state_dir) == "/tmp/hb-state"
+
+
+def test_bad_node_id_is_rejected():
+    with pytest.raises(config.ConfigError):
+        config.parse('[matter]\nnode_id = "seven"\n')

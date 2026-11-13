@@ -90,3 +90,26 @@ def test_connect_failure_raises_matter_connection_error():
             await conn.connect()
 
     asyncio.run(body())
+
+
+def test_command_on_a_dropped_connection_raises_matter_connection_error():
+    async def body(conn: matter.WebSocketConnection) -> None:
+        # The server closes the socket on this command, so recv() raises a
+        # websockets ConnectionClosed; callers must see MatterConnectionError.
+        with pytest.raises(matter.MatterConnectionError):
+            await conn.command("hangup")
+
+    async def serve(websocket) -> None:
+        await websocket.send(json.dumps({"sdk_version": "test"}))
+        await websocket.recv()
+        await websocket.close()
+
+    async def run() -> None:
+        async with websockets.serve(serve, "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            async with matter.WebSocketConnection(
+                f"ws://127.0.0.1:{port}/ws"
+            ) as conn:
+                await body(conn)
+
+    asyncio.run(run())

@@ -36,3 +36,8 @@ node_id = 0
 # comfort_f = 72              # setpoint when anyone is home
 # away_f = 82                 # setpoint once everyone has been gone the delay
 # away_minutes = 20           # minutes unseen before a person counts as away
+#
+# [daemon]
+# # Where the daemon keeps state.json (what it last set, the override flag). The
+# # homebody service user must own it. This is the default.
+# state_dir = "/var/lib/homebody"

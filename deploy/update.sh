@@ -25,7 +25,7 @@ set -euo pipefail
 repo="${HOMEBODY_REPO:-/opt/homebody}"
 state="${HOMEBODY_STATE:-/var/lib/homebody/update/update.state}"
 install_cmd="${HOMEBODY_INSTALL:-$repo/deploy/install.sh}"
-services="${HOMEBODY_SERVICES:-homebody-matter}"
+services="${HOMEBODY_SERVICES:-homebody-matter homebody}"
 
 cd "$repo"
 

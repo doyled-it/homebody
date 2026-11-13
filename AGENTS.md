@@ -13,7 +13,7 @@ the LAN, and there is nothing identifying in this repo. The full design is in
 `docs/superpowers/specs/2026-11-11-homebody-design.md`.
 
 It runs on the snaphouse hub as two services: `homebody-matter` (the Matter
-controller) and, in a later task, `homebody` (the presence-and-decision daemon).
+controller) and `homebody` (the presence-and-decision daemon, `homebody run`).
 
 ## Commands
 
@@ -36,7 +36,9 @@ src/homebody/
   matter.py     the thin Matter controller client (WebSocket), unit conversions
   config.py     reads /etc/homebody/local.toml into typed settings
   presence.py   who is home: Wi-Fi and Bluetooth probes, the 20 minute window
-  cli.py        the console entry point (homebody matter ...)
+  climate.py    pure decisions: transitions, override, pacing, backoff
+  daemon.py     the service loop and the atomic state file
+  cli.py        the console entry point (homebody matter ..., homebody run)
 deploy/
   install.sh    root installer: user, config, dirs, uv venv, verify, last-good
   update.sh     self-update from main with a verify step and last-good fallback
@@ -90,6 +92,40 @@ and `CapabilityBoundingSet=CAP_NET_RAW`, and if it uses `RestrictAddressFamilies
 allow `AF_INET AF_NETLINK AF_BLUETOOTH`. The hub also needs `iproute2`,
 `iputils-arping`, and `bluez` (for `l2ping`) installed. The unit lands with the
 daemon task; until then nothing runs these probes.
+
+## Decisions and the daemon
+
+`climate.py` is pure logic with an injected clock. Occupied is Cool at the comfort
+setpoint, unoccupied is Cool at the away setpoint, and presence "unknown" never
+triggers anything. A command is owed once per occupied/unoccupied transition.
+Before commanding, the thermostat is read and compared with what homebody last
+set (setpoints within 0.25 C count as equal, because the Nest rounds to half
+degrees); a difference is a hand change, so an override is recorded and nothing
+is sent until the next transition, which takes over without re-flagging the hand
+change. Transitions that pile up during an outage collapse, since the target is
+always computed from the latest occupancy. Commands are paced to one a minute
+(the mode and setpoint writes are one command) and failures back off from 60 s
+to 15 min. A write that failed part way is retried without the hand-change
+check, so a half-applied command is not mistaken for a person.
+
+`daemon.py` ticks every 15 s: poll presence (in a thread, the probes block), feed
+the occupancy to the controller, and when a command is owed read the thermostat
+and write the target. Any Matter or thermostat failure (including
+`MatterConnectionError`, which `WebSocketConnection.command()` now raises for a
+dropped socket) drops the connection, backs off, and reconnects later; presence
+keeps tracking and the loop never raises. `homebody run` starts it; it handles
+SIGTERM.
+
+State is saved to `state.json` in the state dir (`[daemon] state_dir`, default
+`/var/lib/homebody`; the service user must own it) with a write-temp, fsync,
+replace: `climate` (last commanded mode and setpoint in Matter units, the override
+flag, whether a transition is pending, the last transition and last change
+times) and `enabled` (runtime enable flags per person id, applied over the
+local.toml defaults at start). A missing or damaged file starts fresh. The daemon
+reads `[matter] url` and `node_id` from the config (node id 0 finds the first
+thermostat); `HOMEBODY_MATTER_URL` overrides the URL. The `homebody` systemd
+unit lands with the snaphouse role in the next task; `deploy/update.sh` already
+restarts it alongside `homebody-matter`.
 
 ## The Python pin
 

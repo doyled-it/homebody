@@ -5,21 +5,24 @@ can confirm the app is wired up. The ``matter`` subcommands drive the Matter
 controller for the first-task proof: commission the Nest with a sharing code,
 read its live mode, temperature, and setpoint, and write the setpoint or mode.
 
-Later tasks add the presence and decision subcommands; this keeps the same
-argparse shape.
+``homebody run`` starts the service loop (presence, decisions, thermostat
+control); the homebody systemd unit runs it. Later tasks add the status file and
+API; this keeps the same argparse shape.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import os
+import signal
 import sys
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from typing import Any
 
-from homebody import __version__, matter
+from homebody import __version__, config, daemon, matter
 
 # A connect factory turns a controller URL into an async context manager that
 # yields a MatterConnection. The default opens a real WebSocket; tests inject a
@@ -37,7 +40,10 @@ def _default_connect(url: str) -> AbstractAsyncContextManager[Any]:
 
 
 def main(
-    argv: list[str] | None = None, *, connect: ConnectFactory | None = None
+    argv: list[str] | None = None,
+    *,
+    connect: ConnectFactory | None = None,
+    run_daemon: Callable[[config.Config], None] | None = None,
 ) -> int:
     parser = argparse.ArgumentParser(
         prog="homebody",
@@ -46,14 +52,52 @@ def main(
     parser.add_argument("--version", action="version", version=__version__)
     subparsers = parser.add_subparsers(dest="command")
     _add_matter(subparsers)
+    run_cmd = subparsers.add_parser(
+        "run", help="run the presence and thermostat service loop"
+    )
+    run_cmd.add_argument(
+        "--config",
+        default=os.environ.get("HOMEBODY_CONFIG", str(config.DEFAULT_CONFIG_PATH)),
+        help="the local config file (default: /etc/homebody/local.toml)",
+    )
 
     args = parser.parse_args(argv)
 
     if args.command == "matter":
         return _run_matter(args, connect or _default_connect)
 
+    if args.command == "run":
+        return _run_service(args.config, run_daemon or _serve)
+
     print(f"homebody {__version__}: controller {_matter_url()}")
     return 0
+
+
+def _run_service(path: str, run_daemon: Callable[[config.Config], None]) -> int:
+    try:
+        settings = config.load(path)
+    except config.ConfigError as error:
+        print(f"config error: {error}", file=sys.stderr)
+        return 1
+    run_daemon(settings)
+    return 0
+
+
+def _serve(settings: config.Config) -> None:
+    """Run the real daemon until SIGTERM or SIGINT."""
+    logging.basicConfig(
+        level=logging.INFO, format="%(levelname)s %(name)s: %(message)s"
+    )
+
+    async def main_loop() -> None:
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, stop.set)
+        override = os.environ.get("HOMEBODY_MATTER_URL")
+        await daemon.build(settings, url=override).run(stop)
+
+    asyncio.run(main_loop())
 
 
 def _add_matter(subparsers: argparse._SubParsersAction) -> None:
