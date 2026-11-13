@@ -131,6 +131,7 @@ class ClimateController:
         s = self.state
         s.takeover = s.override
         s.override = False
+        s.attempting = False
         s.occupied = occupied
         s.pending = True
         s.last_transition = self._clock()

@@ -229,6 +229,25 @@ def test_retry_after_a_partial_write_is_not_mistaken_for_an_override():
     assert ctl.state.override is False
 
 
+def test_a_new_transition_clears_the_half_write_flag_so_a_hand_change_is_seen():
+    ctl, clock = make()
+    ctl.observe(True)
+    send(ctl, thermostat(setpoint=AWAY))  # last commanded: COOL at comfort
+    clock.advance(30 * MIN)
+    ctl.observe(False)
+    cmd = ctl.decide(thermostat(setpoint=COMFORT))
+    assert cmd is not None
+    ctl.begin_command()
+    ctl.failed()  # the mode write landed, the setpoint write did not
+    clock.advance(2 * MIN)
+    # Someone hand-changes the Nest while the retry is backing off.
+    clock.advance(1 * MIN)
+    ctl.observe(True)  # occupancy flips: a genuine new transition
+    assert ctl.decide(thermostat(setpoint=2500)) is None
+    assert ctl.state.override is True
+    assert not ctl.due()
+
+
 def test_state_round_trips_through_a_dict():
     ctl, _ = make()
     ctl.observe(True)
