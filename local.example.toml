@@ -41,3 +41,14 @@ node_id = 0
 # # Where the daemon keeps state.json (what it last set, the override flag). The
 # # homebody service user must own it. This is the default.
 # state_dir = "/var/lib/homebody"
+#
+# [status]
+# # Where homebody writes homebody.json for the room picker (nginx serves it). The
+# # homebody service user must own this directory. This is the default.
+# dir = "/var/lib/snaphouse/public/homebody"
+#
+# [api]
+# # The settings API listens on 127.0.0.1 at this port; nginx proxies
+# # /api/homebody/ to it. Settings changed through the API are kept in the daemon
+# # state and win over the [climate] values above, which stay read-only.
+# port = 8783

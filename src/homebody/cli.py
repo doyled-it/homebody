@@ -6,8 +6,7 @@ controller for the first-task proof: commission the Nest with a sharing code,
 read its live mode, temperature, and setpoint, and write the setpoint or mode.
 
 ``homebody run`` starts the service loop (presence, decisions, thermostat
-control); the homebody systemd unit runs it. Later tasks add the status file and
-API; this keeps the same argparse shape.
+control) and the settings API; the homebody systemd unit runs it.
 """
 
 from __future__ import annotations
@@ -22,7 +21,7 @@ from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from typing import Any
 
-from homebody import __version__, config, daemon, matter
+from homebody import __version__, api, config, daemon, matter
 
 # A connect factory turns a controller URL into an async context manager that
 # yields a MatterConnection. The default opens a real WebSocket; tests inject a
@@ -95,9 +94,30 @@ def _serve(settings: config.Config) -> None:
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, stop.set)
         override = os.environ.get("HOMEBODY_MATTER_URL")
-        await daemon.build(settings, url=override).run(stop)
+        service = daemon.build(settings, url=override)
+        server = await _start_api(service, settings.api_port)
+        try:
+            await service.run(stop)
+        finally:
+            if server is not None:
+                server.close()
+                await server.wait_closed()
 
     asyncio.run(main_loop())
+
+
+async def _start_api(
+    service: daemon.Daemon, port: int
+) -> asyncio.Server | None:
+    """Start the settings API on loopback. Presence control matters more than
+    the API, so a port that cannot be bound is logged and the loop runs anyway."""
+    try:
+        return await api.start(service, "127.0.0.1", port)
+    except OSError:
+        logging.getLogger(__name__).exception(
+            "settings API could not listen on port %d", port
+        )
+        return None
 
 
 def _add_matter(subparsers: argparse._SubParsersAction) -> None:

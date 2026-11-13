@@ -37,7 +37,9 @@ src/homebody/
   config.py     reads /etc/homebody/local.toml into typed settings
   presence.py   who is home: Wi-Fi and Bluetooth probes, the 20 minute window
   climate.py    pure decisions: transitions, override, pacing, backoff
-  daemon.py     the service loop and the atomic state file
+  daemon.py     the service loop, the atomic state file, runtime settings
+  status.py     the homebody.json document and its atomic writer
+  api.py        the settings HTTP service (asyncio, stdlib only)
   cli.py        the console entry point (homebody matter ..., homebody run)
 deploy/
   install.sh    root installer: user, config, dirs, uv venv, verify, last-good
@@ -126,6 +128,37 @@ reads `[matter] url` and `node_id` from the config (node id 0 finds the first
 thermostat); `HOMEBODY_MATTER_URL` overrides the URL. The `homebody` systemd
 unit lands with the snaphouse role in the next task; `deploy/update.sh` already
 restarts it alongside `homebody-matter`.
+
+## Status file and settings API
+
+`status.py` builds the status document (shape in the hub repo's
+`docs/cross-repo-features.md`; every key always present, null when unknown,
+enabled people only, display names, UTC timestamps in whole seconds) and
+`StatusWriter` replaces `homebody.json` atomically (temp in the same directory,
+fsync, rename, mode 0644). `[status] dir` (default
+`/var/lib/snaphouse/public/homebody`) must be owned by the service user. The
+daemon writes it after every tick and right after a settings change. To keep
+the thermostat fields fresh it also reads the thermostat once a minute when no
+command is owed (read only; a failed read marks `reachable` false but does not
+touch the command backoff).
+
+`api.py` serves `POST /api/homebody/settings` on 127.0.0.1 (`[api] port`,
+default 8783) inside `homebody run`, with a pure `handle()` function and a
+minimal asyncio HTTP server. Header guard `X-Snaphouse: 1` (403), validation
+(400), other paths 404, other methods 405. A port that cannot be bound is
+logged and the daemon runs without the API.
+
+Settings live in the daemon state, not in `local.toml`: `state.json` has a
+`settings` object holding only the keys changed through the API, which override
+the `[climate]` defaults (`local.toml` stays read-only to homebody). `enabled`
+is one global automation switch: off keeps presence tracking and publishing but
+sends no commands; transitions that happen meanwhile stay pending and are acted
+on after it is turned back on (subject to pacing and the override rule). This is
+separate from the per-person runtime flags (`Daemon.set_enabled`, the `enabled`
+map in state), which the API does not expose. A changed `away_minutes` applies
+to the presence window at once. A changed `comfort_f` or `away_f` makes the
+climate controller owe a command (`ClimateController.set_setpoints`) unless a
+hand-change override is active, which still holds until the next transition.
 
 ## The Python pin
 
