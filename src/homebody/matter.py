@@ -274,13 +274,19 @@ class WebSocketConnection:
     async def connect(self) -> None:
         try:
             self._ws = await websockets.connect(self._url, max_size=None)
-        except OSError as err:
+        except (OSError, websockets.WebSocketException) as err:
             raise MatterConnectionError(
                 f"cannot connect to {self._url}: {err}"
             ) from err
         # The controller sends its ServerInfoMessage first; read it so it does
         # not get mistaken for a command reply.
-        raw = await self._ws.recv()
+        try:
+            raw = await self._ws.recv()
+        except (OSError, websockets.WebSocketException) as err:
+            self._ws = None
+            raise MatterConnectionError(
+                f"connection to {self._url} closed during the handshake: {err}"
+            ) from err
         self.server_info = json.loads(raw)
 
     async def close(self) -> None:
@@ -297,13 +303,16 @@ class WebSocketConnection:
         message: dict[str, Any] = {"message_id": message_id, "command": command}
         if args:
             message["args"] = args
-        await self._ws.send(json.dumps(message))
-
-        while True:
-            reply = json.loads(await self._ws.recv())
-            if reply.get("message_id") != message_id:
+        try:
+            await self._ws.send(json.dumps(message))
+            while True:
+                reply = json.loads(await self._ws.recv())
+                if reply.get("message_id") == message_id:
+                    break
                 # A ServerInfo update or a stateless event; not our reply.
-                continue
-            if "error_code" in reply:
-                raise CommandError(reply["error_code"], reply.get("details"))
-            return reply.get("result")
+        except (OSError, websockets.WebSocketException) as err:
+            raise MatterConnectionError(f"connection lost: {err}") from err
+
+        if "error_code" in reply:
+            raise CommandError(reply["error_code"], reply.get("details"))
+        return reply.get("result")

@@ -109,6 +109,7 @@ def test_new_good_commit_becomes_last_good(tmp_path):
     assert _git(repo, "rev-parse", "HEAD") == b
     assert state.read_text().splitlines()[0] == b
     assert "systemctl restart homebody-matter" in log.read_text()
+    assert "systemctl restart homebody\n" in log.read_text()
 
 
 def test_bad_commit_rolls_back_and_is_not_retried_until_main_moves(tmp_path):

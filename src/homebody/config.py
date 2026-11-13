@@ -13,7 +13,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from homebody.matter import DEFAULT_MATTER_URL
+
 DEFAULT_CONFIG_PATH = Path("/etc/homebody/local.toml")
+DEFAULT_STATE_DIR = Path("/var/lib/homebody")
 
 _MAC = re.compile(r"^[0-9a-f]{2}(:[0-9a-f]{2}){5}$")
 
@@ -39,6 +42,10 @@ class Config:
     comfort_f: int = 72
     away_f: int = 82
     away_minutes: int = 20
+    matter_url: str = DEFAULT_MATTER_URL
+    # 0 means "not set": the daemon finds the first node with a thermostat.
+    matter_node_id: int = 0
+    state_dir: Path = DEFAULT_STATE_DIR
 
     @property
     def enabled_people(self) -> tuple[Person, ...]:
@@ -87,12 +94,22 @@ def parse(text: str) -> Config:
     people = tuple(_person(p, i) for i, p in enumerate(data.get("person", [])))
     adapter = _mac(data.get("bluetooth", {}).get("adapter"), "bluetooth adapter")
     climate = data.get("climate", {})
+    matter = data.get("matter", {})
+    url = matter.get("url", DEFAULT_MATTER_URL)
+    if not isinstance(url, str) or not url.startswith(("ws://", "wss://")):
+        raise ConfigError("matter url: must be a ws:// or wss:// address")
+    state_dir = data.get("daemon", {}).get("state_dir", str(DEFAULT_STATE_DIR))
+    if not isinstance(state_dir, str) or not state_dir:
+        raise ConfigError("daemon state_dir: must be a path")
     return Config(
         people=people,
         bluetooth_adapter=adapter,
         comfort_f=_int(climate.get("comfort_f"), "comfort_f", 72),
         away_f=_int(climate.get("away_f"), "away_f", 82),
         away_minutes=_int(climate.get("away_minutes"), "away_minutes", 20),
+        matter_url=url,
+        matter_node_id=_int(matter.get("node_id"), "matter node_id", 0),
+        state_dir=Path(state_dir),
     )
 
 
