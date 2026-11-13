@@ -69,7 +69,7 @@ change. If the controller or thermostat is unreachable it keeps tracking
 presence and retries with backoff, then acts on the latest state only.
 
 It keeps a small state file, `state.json`, in the state directory
-(`/var/lib/homebody` unless `[daemon] state_dir` says otherwise): what it last
+(`/var/lib/homebody/state`, which deploy/install.sh creates for the service user, unless `[daemon] state_dir` says otherwise): what it last
 set, the override flag, the last change and transition times, and any runtime
 enable flags, and any settings changed through the API (see below). The file is
 replaced atomically, so a restart resumes where it left off and a damaged file

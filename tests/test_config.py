@@ -100,7 +100,7 @@ def test_daemon_settings_default_and_parse():
     default = config.parse("")
     assert default.matter_url == "ws://127.0.0.1:5580/ws"
     assert default.matter_node_id == 0
-    assert str(default.state_dir) == "/var/lib/homebody"
+    assert str(default.state_dir) == "/var/lib/homebody/state"
 
     custom = config.parse(
         '[matter]\nurl = "ws://127.0.0.1:9/ws"\nnode_id = 7\n'
