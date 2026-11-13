@@ -67,6 +67,9 @@ class ClimateState:
     attempting: bool = False
     last_transition: float | None = None
     last_change: float | None = None
+    # What the last applied command set and why ("home" or "away"), for status.
+    last_change_c100: int | None = None
+    last_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -86,6 +89,8 @@ class ClimateState:
             "attempting": (bool,),
             "last_transition": (int, float),
             "last_change": (int, float),
+            "last_change_c100": (int,),
+            "last_reason": (str,),
         }
         clean: dict[str, Any] = {}
         for f in fields(cls):
@@ -123,6 +128,21 @@ class ClimateController:
         return Command(
             int(SystemMode.COOL), self._comfort if occupied else self._away
         )
+
+    def set_setpoints(self, comfort_f: float, away_f: float) -> None:
+        """Change the two targets. A changed target owes a command (not an override).
+
+        A hand-change override still holds until the next transition, which
+        takes over with the new targets.
+        """
+        self._comfort = fahrenheit_to_centi_celsius(comfort_f)
+        self._away = fahrenheit_to_centi_celsius(away_f)
+        s = self.state
+        cmd = self.target()
+        if cmd is None or s.override or s.pending:
+            return
+        if (s.mode, s.setpoint_c100) != (cmd.mode, cmd.setpoint_c100):
+            s.pending = True
 
     def observe(self, occupied: bool | None) -> None:
         """Feed the latest occupancy. A change of state is a transition."""
@@ -173,8 +193,14 @@ class ClimateController:
 
     def succeeded(self, cmd: Command) -> None:
         self._record(cmd)
-        self.state.last_change = self._clock()
+        s = self.state
+        s.last_change = self._clock()
+        s.last_change_c100 = cmd.setpoint_c100
+        s.last_reason = "home" if s.occupied else "away"
         self._settle()
+        if self.target() != cmd:
+            # The targets changed while this command was in flight.
+            s.pending = True
 
     def failed(self) -> None:
         """A read or write failed: back off before the next try."""

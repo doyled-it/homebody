@@ -123,6 +123,10 @@ class PresenceTracker:
                 return True
         return False
 
+    def set_away_window(self, seconds: float) -> None:
+        """Change how long someone stays home after the last sighting."""
+        self._window = seconds
+
     def enabled_flags(self) -> dict[str, bool]:
         return {t.person.id: t.enabled for t in self._tracked}
 

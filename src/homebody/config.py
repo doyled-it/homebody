@@ -17,6 +17,8 @@ from homebody.matter import DEFAULT_MATTER_URL
 
 DEFAULT_CONFIG_PATH = Path("/etc/homebody/local.toml")
 DEFAULT_STATE_DIR = Path("/var/lib/homebody")
+DEFAULT_STATUS_DIR = Path("/var/lib/snaphouse/public/homebody")
+DEFAULT_API_PORT = 8783
 
 _MAC = re.compile(r"^[0-9a-f]{2}(:[0-9a-f]{2}){5}$")
 
@@ -46,6 +48,10 @@ class Config:
     # 0 means "not set": the daemon finds the first node with a thermostat.
     matter_node_id: int = 0
     state_dir: Path = DEFAULT_STATE_DIR
+    # Where homebody.json is written (a directory the service user owns).
+    status_dir: Path = DEFAULT_STATUS_DIR
+    # The settings API listens on 127.0.0.1 at this port.
+    api_port: int = DEFAULT_API_PORT
 
     @property
     def enabled_people(self) -> tuple[Person, ...]:
@@ -101,6 +107,12 @@ def parse(text: str) -> Config:
     state_dir = data.get("daemon", {}).get("state_dir", str(DEFAULT_STATE_DIR))
     if not isinstance(state_dir, str) or not state_dir:
         raise ConfigError("daemon state_dir: must be a path")
+    status_dir = data.get("status", {}).get("dir", str(DEFAULT_STATUS_DIR))
+    if not isinstance(status_dir, str) or not status_dir:
+        raise ConfigError("status dir: must be a path")
+    api_port = _int(data.get("api", {}).get("port"), "api port", DEFAULT_API_PORT)
+    if not 1 <= api_port <= 65535:
+        raise ConfigError("api port: must be between 1 and 65535")
     return Config(
         people=people,
         bluetooth_adapter=adapter,
@@ -110,6 +122,8 @@ def parse(text: str) -> Config:
         matter_url=url,
         matter_node_id=_int(matter.get("node_id"), "matter node_id", 0),
         state_dir=Path(state_dir),
+        status_dir=Path(status_dir),
+        api_port=api_port,
     )
 
 

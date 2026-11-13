@@ -114,3 +114,18 @@ def test_daemon_settings_default_and_parse():
 def test_bad_node_id_is_rejected():
     with pytest.raises(config.ConfigError):
         config.parse('[matter]\nnode_id = "seven"\n')
+
+
+def test_status_and_api_defaults_and_overrides():
+    cfg = config.parse("")
+    assert str(cfg.status_dir) == "/var/lib/snaphouse/public/homebody"
+    assert cfg.api_port == 8783
+    cfg = config.parse('[status]\ndir = "/tmp/x"\n[api]\nport = 9000\n')
+    assert (str(cfg.status_dir), cfg.api_port) == ("/tmp/x", 9000)
+
+
+@pytest.mark.parametrize("text", ["[api]\nport = 0\n", "[api]\nport = 70000\n",
+                                  '[api]\nport = "80"\n', "[status]\ndir = 3\n"])
+def test_bad_status_and_api_settings_are_rejected(text):
+    with pytest.raises(config.ConfigError):
+        config.parse(text)

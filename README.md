@@ -12,12 +12,9 @@ lives in an untracked local config on the hub, never here.
 
 ## Status
 
-Early. This task lands the repository scaffold and the Matter controller client:
-a thin client over the controller's WebSocket API that lists nodes, reads the
-thermostat's mode, temperature, and cooling setpoint, and writes the mode and
-setpoint, plus a CLI to commission the Nest and read its live state. Presence,
-the decision loop, the status file, the local API, and the room-picker Climate
-screen come in later tasks.
+Early. The Matter controller client, presence, the decision loop, the status
+file, and the local settings API are in. The room-picker Climate screen comes in
+a later task.
 
 ## How it fits together
 
@@ -74,8 +71,30 @@ presence and retries with backoff, then acts on the latest state only.
 It keeps a small state file, `state.json`, in the state directory
 (`/var/lib/homebody` unless `[daemon] state_dir` says otherwise): what it last
 set, the override flag, the last change and transition times, and any runtime
-enable flags. The file is replaced atomically, so a restart resumes where it
-left off and a damaged file just starts fresh.
+enable flags, and any settings changed through the API (see below). The file is
+replaced atomically, so a restart resumes where it left off and a damaged file
+just starts fresh.
+
+### Status file and settings API
+
+After every tick, and right after a settings change, homebody writes
+`homebody.json` (atomically, mode 0644) into `[status] dir` (default
+`/var/lib/snaphouse/public/homebody`); the hub's nginx serves it. It holds the
+enabled people (display names, home or away, last seen, which signal), whether
+the house is occupied, the thermostat's mode, setpoint and temperature, the
+override flag, the last change homebody made, the automation switch, and the
+three settings. Every key is always present and is null when unknown.
+
+`homebody run` also listens on `127.0.0.1:8783` (`[api] port`). The hub's nginx
+proxies `/api/homebody/` to it. `POST /api/homebody/settings` takes a JSON object
+with any of `enabled` (true or false), `comfort_f` (60 to 85), `away_f` (65 to
+90) and `away_minutes` (5 to 120), with comfort kept below away, and needs the
+header `X-Snaphouse: 1`. It answers with the full status document, or a 400, 403,
+404 or 405 with `{"error": "..."}`. With `enabled` false, presence is still
+tracked and published but no thermostat commands are sent.
+
+Settings changed this way are saved in the daemon state and win over the
+`[climate]` values in `local.toml`, which homebody never writes.
 
 ## Deployment
 
