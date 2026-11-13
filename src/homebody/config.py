@@ -16,7 +16,7 @@ from typing import Any
 from homebody.matter import DEFAULT_MATTER_URL
 
 DEFAULT_CONFIG_PATH = Path("/etc/homebody/local.toml")
-DEFAULT_STATE_DIR = Path("/var/lib/homebody")
+DEFAULT_STATE_DIR = Path("/var/lib/homebody/state")
 DEFAULT_STATUS_DIR = Path("/var/lib/snaphouse/public/homebody")
 DEFAULT_API_PORT = 8783
 

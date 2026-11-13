@@ -119,7 +119,8 @@ keeps tracking and the loop never raises. `homebody run` starts it; it handles
 SIGTERM.
 
 State is saved to `state.json` in the state dir (`[daemon] state_dir`, default
-`/var/lib/homebody`; the service user must own it) with a write-temp, fsync,
+`/var/lib/homebody/state`, which deploy/install.sh creates owned by the service user;
+the parent `/var/lib/homebody` is root-owned) with a write-temp, fsync,
 replace: `climate` (last commanded mode and setpoint in Matter units, the override
 flag, whether a transition is pending, the last transition and last change
 times) and `enabled` (runtime enable flags per person id, applied over the
