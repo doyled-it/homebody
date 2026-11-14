@@ -411,7 +411,7 @@ def test_paused_note_does_not_use_up_a_cap_slot():
         rig.rules.mark_sent(alert)
     rig.model.note_command("close")
     rig.close()
-    rig.clock.advance(50)
+    rig.clock.advance(47.5)
     rig.open()
     rig.clock.advance(1)
     # the first of the six sent alerts is now over an hour old: one slot is free
