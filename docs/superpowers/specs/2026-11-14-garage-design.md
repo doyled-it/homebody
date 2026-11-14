@@ -102,12 +102,12 @@ connect, call `list_entities_services()` to learn entity keys, then
 `cover_command(key, ...)`. `ReconnectLogic` handles reconnects, with the library's own
 keepalive pings detecting a dead link.
 
-Encryption: the ESPHome native API supports a pre-shared noise key (32 bytes, base64). Whether
-the blaQ ships with one set depends on how it is flashed and configured (Konnected's app
-or the ESPHome dashboard), so this is an install-day check, not an assumption. The design
-requires encryption on (LAN traffic that can open a garage door should not be plaintext),
-with the key in local config. Builder's call to accept an unencrypted link only if the
-firmware cannot do otherwise, and to write that down.
+Encryption (Owner decision, 2026-11-14): the stock blaQ firmware has a bare `api:` with no
+key, so anything on the home Wi-Fi could command the door. On install day the board is
+reflashed once with Konnected's own ESPHome config plus a native API encryption key (32
+bytes, base64), built with ESPHome on the Mac. The key lives only in local config. homebody
+requires the key; `allow_plaintext = true` exists only for tests and the loopback board.
+Later firmware updates go through ESPHome, not Konnected's one-click updater.
 
 Entities used, matched by name from `list_entities_services` (names are config, with
 defaults from the public konnected-io ESPHome config; confirm on install day):
@@ -554,8 +554,8 @@ All tests run on any dev machine with `uv run pytest`, no hardware, no network.
 
 1. Install the blaQ per Konnected's instructions, on the opener's wall-button terminals.
    Confirm the wall button, myQ and the remotes still work.
-2. In the board's setup, find or set the native API encryption key and the board's name
-   on the LAN. Give it a fixed address reservation on the router.
+2. Reflash the board with Konnected's ESPHome config plus an `api: encryption: key:`
+   (Owner decision), and note the board's name on the LAN. Give it a fixed address reservation on the router.
 3. Put `[garage]` in `/etc/homebody/local.toml` (board, key, page URL, ntfy). `garage_remote`
    stays off. Restart `homebody`; the log should show the garage connecting.
 4. Open the page at home. The Garage tab should appear with the right state and "for how
