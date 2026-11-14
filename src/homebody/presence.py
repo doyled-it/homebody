@@ -15,6 +15,7 @@ real ones; they never raise, a failed probe just means "not seen".
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import subprocess
 from collections.abc import Callable, Sequence
@@ -264,6 +265,32 @@ class NeighbourWifiProbe:
         except (OSError, subprocess.SubprocessError):
             log.warning("wifi probe could not run")
             return False
+
+
+def neighbour_mac(ip: str, runner: Runner = run_command) -> str | None:
+    """The hardware address the kernel has for an IPv4 address, lower-case.
+
+    ``None`` unless ``ip`` is a valid IPv4 address with a usable neighbour entry
+    (not FAILED or INCOMPLETE), or when the lookup cannot run.
+    """
+    try:
+        ipaddress.IPv4Address(ip)
+    except ValueError:
+        return None
+    try:
+        rc, out = runner(["ip", "-4", "neigh", "show", ip], 5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if rc != 0:
+        return None
+    for line in out.splitlines():
+        parts = line.split()
+        if "lladdr" not in parts or parts[-1] in NeighbourWifiProbe._BAD:
+            continue
+        index = parts.index("lladdr") + 1
+        if index < len(parts):
+            return parts[index].lower()
+    return None
 
 
 class L2pingBluetoothProbe:

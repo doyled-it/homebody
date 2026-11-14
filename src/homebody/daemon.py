@@ -241,6 +241,7 @@ class Daemon:
         person = Person(clean_name(name, taken), True, mac, None, new_person_id())
         self._presence.add_person(person)
         self._added.append(person)
+        log.info("added person %s", person.id)
         self._save_quietly()
         return self.publish()
 
@@ -252,6 +253,7 @@ class Daemon:
             raise PeopleError("That person cannot be removed here.")
         self._added = [p for p in self._added if p.id != person_id]
         self._enabled.pop(person_id, None)
+        log.info("removed person %s", person_id)
         self._save_quietly()
         return self.publish()
 

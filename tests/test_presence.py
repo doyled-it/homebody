@@ -506,3 +506,28 @@ def test_counted_as_finds_config_people_ignoring_case():
     )
     assert tracker.person_for_mac("02:00:00:00:00:0A") == alex
     assert tracker.person_for_mac("02:00:00:00:00:0b") is None
+
+
+def test_neighbour_mac_reads_lladdr():
+    runner = Runner(
+        {"ip": (0, "192.0.2.5 dev eth0 lladdr 02:00:00:00:00:0A STALE\n")}
+    )
+    assert presence.neighbour_mac("192.0.2.5", runner) == "02:00:00:00:00:0a"
+    assert runner.cmds == [["ip", "-4", "neigh", "show", "192.0.2.5"]]
+
+
+def test_neighbour_mac_rejects_failed_and_non_ipv4():
+    failed = Runner({"ip": (0, "192.0.2.5 dev eth0  FAILED\n")})
+    assert presence.neighbour_mac("192.0.2.5", failed) is None
+    line = "192.0.2.5 dev eth0 lladdr 02:00:00:00:00:0a INCOMPLETE\n"
+    incomplete = Runner({"ip": (0, line)})
+    assert presence.neighbour_mac("192.0.2.5", incomplete) is None
+    untouched = Runner({})
+    for bad in ("fe80::1", "not-an-ip", "", "192.0.2.5; ls"):
+        assert presence.neighbour_mac(bad, untouched) is None
+    assert untouched.cmds == []
+
+
+def test_neighbour_mac_is_none_on_errors():
+    assert presence.neighbour_mac("192.0.2.5", Runner({"ip": OSError("x")})) is None
+    assert presence.neighbour_mac("192.0.2.5", Runner({"ip": (1, "")})) is None

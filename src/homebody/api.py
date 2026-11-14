@@ -1,10 +1,16 @@
 """The settings API: a tiny local HTTP service inside ``homebody run``.
 
-One endpoint, ``POST /api/homebody/settings``, takes a JSON object with any
+``POST /api/homebody/settings`` takes a JSON object with any
 subset of ``enabled``, ``comfort_f``, ``away_f`` and ``away_minutes`` and
 answers with the full status document. It listens on loopback only; the hub's
 nginx proxies ``/api/homebody/`` to it. Requests need the ``X-Snaphouse: 1``
 header (a cheap guard against a stray browser form post, not authentication).
+
+Three more endpoints let a phone on the home Wi-Fi count itself as home:
+``GET people/this-device``, ``POST people/add`` and ``POST people/remove``. The
+device is found from the ``X-Real-IP`` header nginx sets, looked up in the
+kernel neighbour table. A request with ``CF-Connecting-IP`` came through the
+tunnel from away, so it cannot add (removing is allowed).
 
 The handler is a pure function over (method, path, headers, body) so the rules
 are tested without sockets; ``start`` wraps it in a minimal asyncio HTTP server
@@ -16,12 +22,23 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any, Protocol
+
+from homebody import presence
+from homebody.people import PeopleError
 
 log = logging.getLogger(__name__)
 
 SETTINGS_PATH = "/api/homebody/settings"
+PEOPLE_DEVICE = "/api/homebody/people/this-device"
+PEOPLE_ADD = "/api/homebody/people/add"
+PEOPLE_REMOVE = "/api/homebody/people/remove"
+PEOPLE_PATHS = {
+    PEOPLE_DEVICE: "GET",
+    PEOPLE_ADD: "POST",
+    PEOPLE_REMOVE: "POST",
+}
 GUARD_HEADER = "x-snaphouse"
 MAX_BODY = 64 * 1024
 MAX_HEADER_BYTES = 16 * 1024
@@ -42,6 +59,12 @@ class SettingsTarget(Protocol):
     def settings(self) -> dict[str, Any]: ...
 
     def apply_settings(self, changes: dict[str, Any]) -> dict[str, Any]: ...
+
+    def counted_as(self, wifi_mac: str) -> str | None: ...
+
+    def add_person(self, name: object, wifi_mac: str) -> dict[str, Any]: ...
+
+    def remove_person(self, person_id: object) -> dict[str, Any]: ...
 
 
 class SettingsError(ValueError):
@@ -75,14 +98,92 @@ def validate(body: Any, current: Mapping[str, Any]) -> dict[str, Any]:
     return changes
 
 
+Lookup = Callable[[str], "str | None"]
+
+_REMOTE_ERROR = "Count a phone from the home Wi-Fi, not from away."
+_UNKNOWN_ERROR = "The hub could not tell which device this is."
+
+
+def resolve_device(
+    headers: Mapping[str, str], lookup: Lookup
+) -> tuple[str | None, str | None]:
+    """Find the caller's hardware address: ``(mac, reason)``.
+
+    ``reason`` is ``"remote"`` for a request through the tunnel (checked first)
+    and ``"unknown"`` when the address cannot be found.
+    """
+    if "cf-connecting-ip" in headers:
+        return None, "remote"
+    ip = headers.get("x-real-ip")
+    mac = lookup(ip) if ip else None
+    if mac is None:
+        return None, "unknown"
+    return mac, None
+
+
+def _json_object(body: bytes, allowed: tuple[str, ...]) -> dict[str, Any] | Response:
+    """Parse a body that must be an object with only ``allowed`` keys."""
+    try:
+        parsed = json.loads(body.decode())
+    except (UnicodeDecodeError, ValueError):
+        return 400, {"error": "The request body is not valid JSON."}
+    if not isinstance(parsed, dict):
+        return 400, {"error": "The request body must be a JSON object."}
+    unknown = sorted(k for k in parsed if k not in allowed)
+    if unknown:
+        return 400, {"error": f"Unknown field: {unknown[0]}."}
+    return parsed
+
+
+def _handle_people(
+    target: SettingsTarget,
+    method: str,
+    path: str,
+    headers: Mapping[str, str],
+    body: bytes,
+    lookup: Lookup,
+) -> Response:
+    if method != PEOPLE_PATHS[path]:
+        return 405, {"error": f"Use {PEOPLE_PATHS[path]} here."}
+    if path == PEOPLE_DEVICE:
+        mac, reason = resolve_device(headers, lookup)
+        counted = target.counted_as(mac) if mac else None
+        return 200, {
+            "can_add": mac is not None and counted is None,
+            "counted_as": counted,
+            "reason": reason,
+        }
+    if headers.get(GUARD_HEADER) != "1":
+        return 403, {"error": "Missing the X-Snaphouse header."}
+    if path == PEOPLE_ADD:
+        mac, reason = resolve_device(headers, lookup)
+        if mac is None:
+            message = _REMOTE_ERROR if reason == "remote" else _UNKNOWN_ERROR
+            return 403, {"error": message, "reason": reason}
+    parsed = _json_object(body, ("name",) if path == PEOPLE_ADD else ("id",))
+    if isinstance(parsed, tuple):
+        return parsed
+    try:
+        if path == PEOPLE_ADD:
+            document = target.add_person(parsed.get("name"), mac)
+        else:
+            document = target.remove_person(parsed.get("id"))
+    except PeopleError as error:
+        return error.status, {"error": str(error)}
+    return 200, document
+
+
 def handle(
     target: SettingsTarget,
     method: str,
     path: str,
     headers: Mapping[str, str],
     body: bytes,
+    lookup: Lookup = presence.neighbour_mac,
 ) -> Response:
     """Answer one request. Header names are lower-case."""
+    if path in PEOPLE_PATHS:
+        return _handle_people(target, method, path, headers, body, lookup)
     if path != SETTINGS_PATH:
         return 404, {"error": "Not found."}
     if method != "POST":
@@ -102,7 +203,7 @@ def handle(
 
 _REASONS = {
     200: "OK", 400: "Bad Request", 403: "Forbidden", 404: "Not Found",
-    405: "Method Not Allowed", 413: "Payload Too Large",
+    405: "Method Not Allowed", 409: "Conflict", 413: "Payload Too Large",
 }
 
 
@@ -143,7 +244,7 @@ async def _read_request(
     return parts[0], parts[1].split("?", 1)[0], headers, int(length)
 
 
-def _serve_one(target: SettingsTarget):
+def _serve_one(target: SettingsTarget, lookup: Lookup):
     async def connection(
         reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
@@ -159,7 +260,9 @@ def _serve_one(target: SettingsTarget):
                         response = _encode(413, {"error": "The request is too large."})
                     else:
                         body = await reader.readexactly(length) if length else b""
-                        code, document = handle(target, method, path, headers, body)
+                        code, document = handle(
+                            target, method, path, headers, body, lookup
+                        )
                         response = _encode(code, document)
             writer.write(response)
             await writer.drain()
@@ -173,6 +276,11 @@ def _serve_one(target: SettingsTarget):
     return connection
 
 
-async def start(target: SettingsTarget, host: str, port: int) -> asyncio.Server:
-    """Listen for settings requests; the caller closes the returned server."""
-    return await asyncio.start_server(_serve_one(target), host, port)
+async def start(
+    target: SettingsTarget,
+    host: str,
+    port: int,
+    lookup: Lookup = presence.neighbour_mac,
+) -> asyncio.Server:
+    """Listen for requests; the caller closes the returned server."""
+    return await asyncio.start_server(_serve_one(target, lookup), host, port)

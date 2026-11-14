@@ -93,6 +93,17 @@ header `X-Snaphouse: 1`. It answers with the full status document, or a 400, 403
 404 or 405 with `{"error": "..."}`. With `enabled` false, presence is still
 tracked and published but no thermostat commands are sent.
 
+Three more endpoints let a phone on the home Wi-Fi count itself as home.
+`GET /api/homebody/people/this-device` answers `{"can_add", "counted_as",
+"reason"}` (`reason` is `remote`, `unknown` or null). `POST
+/api/homebody/people/add` takes `{"name"}` and `POST /api/homebody/people/remove`
+takes `{"id"}`; both need `X-Snaphouse: 1` and answer with the status document or
+`{"error": "..."}`. The device is found from the `X-Real-IP` header nginx sets,
+looked up in the kernel neighbour table (`ip -4 neigh show`), so adding works only
+from the home Wi-Fi: a request carrying `CF-Connecting-IP` came through the tunnel
+and gets a 403 with `reason` `remote`. Removing is allowed through the tunnel.
+Added people are tracked by Wi-Fi only.
+
 Settings changed this way are saved in the daemon state and win over the
 `[climate]` values in `local.toml`, which homebody never writes.
 

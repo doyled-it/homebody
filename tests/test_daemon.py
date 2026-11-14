@@ -372,3 +372,43 @@ def test_added_people_survive_restart(tmp_path):
     people = rig.daemon.status_document()["people"]
     names = [p["name"] for p in people if p["removable"]]
     assert names == ["Jo"]
+
+
+def test_saved_people_duplicating_a_configured_phone_or_an_id_are_not_tracked_twice(
+    tmp_path,
+):
+    rig = Rig(tmp_path)
+    state = {
+        "people": [
+            {"id": "added-00000001", "name": "Dup", "wifi_mac": A.wifi_mac},
+            {"id": "added-00000002", "name": "Sam", "wifi_mac": SAM_MAC},
+            {"id": "added-00000002", "name": "Jo", "wifi_mac": "02:00:00:00:00:0b"},
+        ]
+    }
+    (tmp_path / STATE_FILE).write_text(json.dumps(state))
+    rig.daemon = rig.new_daemon()
+    people = rig.daemon.status_document()["people"]
+    added = [p for p in people if p["removable"]]
+    assert [p["name"] for p in added] == ["Sam"]
+    assert [p["id"] for p in people] == ["person-a", "added-00000002"]
+    assert rig.daemon.counted_as(A.wifi_mac) == "Person A"
+
+
+def test_add_person_survives_a_failed_state_save(tmp_path, monkeypatch):
+    rig = Rig(tmp_path)
+
+    def broken(data):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(rig.daemon._store, "save", broken)
+    doc = rig.daemon.add_person("Sam", SAM_MAC)
+    assert [p["name"] for p in doc["people"] if p["removable"]] == ["Sam"]
+    assert rig.daemon.counted_as(SAM_MAC) == "Sam"
+
+
+def test_add_person_with_an_invalid_address_is_400(tmp_path):
+    rig = Rig(tmp_path)
+    with pytest.raises(PeopleError) as e:
+        rig.daemon.add_person("Sam", "not-a-mac")
+    assert e.value.status == 400
+    assert rig.daemon.counted_as("not-a-mac") is None

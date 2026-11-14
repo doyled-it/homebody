@@ -161,6 +161,19 @@ to the presence window at once. A changed `comfort_f` or `away_f` makes the
 climate controller owe a command (`ClimateController.set_setpoints`) unless a
 hand-change override is active, which still holds until the next transition.
 
+People endpoints: `GET /api/homebody/people/this-device`, `POST
+/api/homebody/people/add` (`{"name"}`) and `POST /api/homebody/people/remove`
+(`{"id"}`). `api.resolve_device` finds the caller's address: a request with
+`cf-connecting-ip` came through the tunnel from away and cannot add (403,
+`reason` `remote`, checked first); otherwise `x-real-ip` (set by the hub's nginx)
+is looked up with `presence.neighbour_mac` (`ip -4 neigh show <ip>`, IPv4 only,
+`FAILED`/`INCOMPLETE` ignored), and no answer is 403 `unknown`. Remove is allowed
+through the tunnel. `handle` takes the lookup as a parameter and `api.start`
+passes it from `cli._start_api`, so tests inject a fake. Added people are
+tracked by Wi-Fi only, and adds and removes are logged by id, never address or
+name. The `X-Real-IP` and `CF-Connecting-IP` headers must be passed by the hub's
+nginx (a snaphouse change).
+
 ## The Python pin
 
 `.python-version` pins uv to 3.12. Without it, uv on a host whose system Python is
