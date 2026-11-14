@@ -149,9 +149,10 @@ class EsphomeLink:
     ) -> None:
         self._on_state = on_state
         self._on_connected = on_connected
-        # The library logs the board's address in its own lines; ours carry a
-        # reason only.
-        logging.getLogger("aioesphomeapi").setLevel(logging.CRITICAL + 1)
+        # Keep the library's connection errors visible in the local journal
+        # (install-day bring-up) but drop its chatty INFO and DEBUG lines. Our
+        # own lines carry a reason only.
+        logging.getLogger("aioesphomeapi").setLevel(logging.WARNING)
         logic: Any = None
         try:
             self._client = self._make_client()
@@ -185,6 +186,8 @@ class EsphomeLink:
             raise LinkError("not connected")
         position = 1.0 if action == "open" else 0.0
         try:
+            # cover_command only writes to the transport, so this bound is the
+            # contract more than a guard; the state push confirms the move.
             async with asyncio.timeout(SEND_TIMEOUT):
                 self._client.cover_command(key=key, position=position)
         except (aioesphomeapi.APIConnectionError, TimeoutError) as error:

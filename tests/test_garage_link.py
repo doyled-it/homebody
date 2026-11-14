@@ -48,6 +48,14 @@ class Probe:
         return self.states[-1] if self.states else None
 
 
+def _own_text(caplog: pytest.LogCaptureFixture) -> str:
+    """The log text from homebody's own loggers. The library's lines may carry
+    the board address; that is acceptable in the hub's local journal."""
+    return "\n".join(
+        r.getMessage() for r in caplog.records if r.name.startswith("homebody")
+    )
+
+
 async def until(check: Callable[[], bool], timeout: float = 5.0) -> None:
     async with asyncio.timeout(timeout):
         while not check():
@@ -254,8 +262,9 @@ def test_auth_failure_logs_a_reason_and_never_the_key_or_host(
 
     with caplog.at_level(logging.DEBUG):
         run_with_board(body, board=LoopbackBoard(auth_fails=True))
-    assert HOST not in caplog.text
-    assert "localhost" not in caplog.text
+    assert _own_text(caplog) != ""
+    assert HOST not in _own_text(caplog)
+    assert "localhost" not in _own_text(caplog)
 
 
 def test_encrypted_client_against_a_plaintext_board_logs_a_reason_only(
@@ -280,8 +289,8 @@ def test_encrypted_client_against_a_plaintext_board_logs_a_reason_only(
 
     with caplog.at_level(logging.DEBUG):
         asyncio.run(main())
-    assert FAKE_KEY not in caplog.text
-    assert HOST not in caplog.text
+    assert FAKE_KEY not in _own_text(caplog)
+    assert HOST not in _own_text(caplog)
 
 
 def test_reasons_never_carry_the_error_text() -> None:
@@ -318,10 +327,25 @@ def test_connection_refused_logs_a_reason(caplog: pytest.LogCaptureFixture) -> N
 
     with caplog.at_level(logging.DEBUG):
         asyncio.run(main())
-    assert HOST not in caplog.text
+    assert HOST not in _own_text(caplog)
 
 
 def test_default_service_factory_builds_the_esphome_adapter() -> None:
     config = dataclasses.replace(GarageConfig(host=HOST), noise_psk=FAKE_KEY)
     link = garage_service._default_link(config)
     assert isinstance(link, EsphomeLink)
+
+
+def test_library_warnings_still_reach_the_log_but_debug_does_not(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def body(board: LoopbackBoard, link: EsphomeLink, probe: Probe) -> None:
+        await until(lambda: probe.connected_events == [True])
+        library = logging.getLogger("aioesphomeapi.reconnect_logic")
+        library.warning("library-warning-marker")
+        library.debug("library-debug-marker")
+
+    with caplog.at_level(logging.DEBUG):
+        run_with_board(body)
+    assert "library-warning-marker" in caplog.text
+    assert "library-debug-marker" not in caplog.text
