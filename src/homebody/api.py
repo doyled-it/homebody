@@ -52,10 +52,8 @@ MAX_NONCE = 128
 MAX_BODY = 64 * 1024
 MAX_HEADER_BYTES = 16 * 1024
 READ_TIMEOUT_SECONDS = 10.0
-# A garage request waits on the door, so it runs under its own cap. The cap is
-# the target's ``timeout_seconds`` (the config waits plus headroom); this is
-# what a target without one gets.
-GARAGE_TIMEOUT_SECONDS = 45.0
+# A garage request waits on the door, so it runs under its own cap: the
+# target's ``timeout_seconds`` (the config waits plus headroom).
 
 # key: (minimum, maximum, plain name for messages)
 RANGES = {
@@ -393,9 +391,10 @@ async def _garage_request(
     headers: Mapping[str, str],
     body: bytes,
 ) -> Response:
-    cap = garage.timeout_seconds if garage is not None else GARAGE_TIMEOUT_SECONDS
+    if garage is None:
+        return await handle_garage(None, target, method, path, headers, body)
     try:
-        async with asyncio.timeout(cap):
+        async with asyncio.timeout(garage.timeout_seconds):
             return await handle_garage(garage, target, method, path, headers, body)
     except TimeoutError:
         return 504, {"error": "The garage did not answer in time. Check the card."}

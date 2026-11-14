@@ -492,3 +492,39 @@ def test_attached_garage_source_fills_the_document(tmp_path):
     assert rig.daemon.status_document()["garage"] == {"link": {"connected": True}}
     rig.daemon.attach_garage(lambda: None)
     assert rig.daemon.status_document()["garage"] is None
+
+
+def test_request_publish_wakes_run_and_publishes_without_a_tick(tmp_path, monkeypatch):
+    from homebody import daemon as daemon_module
+
+    monkeypatch.setattr(daemon_module, "TICK_SECONDS", 30.0)
+    rig = Rig(tmp_path)
+    published: list[int] = []
+    real_publish = rig.daemon.publish
+
+    def spy():
+        published.append(1)
+        return real_publish()
+
+    rig.daemon.publish = spy  # type: ignore[method-assign]
+
+    async def until(check):
+        for _ in range(400):
+            if check():
+                return
+            await asyncio.sleep(0.005)
+        raise AssertionError("not reached")
+
+    async def scenario():
+        stop = asyncio.Event()
+        task = asyncio.create_task(rig.daemon.run(stop))
+        await until(lambda: len(published) >= 1)  # the first tick published
+        probes = len(rig.wifi.probed)
+        before = len(published)
+        rig.daemon.request_publish()
+        await until(lambda: len(published) > before)
+        assert len(rig.wifi.probed) == probes  # no second tick ran
+        stop.set()
+        await asyncio.wait_for(task, 3)
+
+    asyncio.run(scenario())

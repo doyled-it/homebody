@@ -164,6 +164,12 @@ class Daemon:
         self._reading: matter.ThermostatState | None = None
         self._next_status_read = 0.0
         self._garage_source: Callable[[], dict[str, Any] | None] | None = None
+        self._publish_requested = asyncio.Event()
+
+    def request_publish(self) -> None:
+        """Ask ``run`` to publish early (the garage calls this when the door
+        changes). It only sets an event; no tick runs."""
+        self._publish_requested.set()
 
     def attach_garage(self, source: Callable[[], dict[str, Any] | None]) -> None:
         """Give the document its ``garage`` value; ``source`` may raise."""
@@ -333,18 +339,45 @@ class Daemon:
             log.exception("could not publish status")
 
     async def run(self, stop: asyncio.Event | None = None) -> None:
-        """Tick until ``stop`` is set, then release the controller."""
+        """Tick until ``stop`` is set, then release the controller.
+
+        Between ticks the loop also wakes on ``request_publish`` and publishes
+        the status document (only that; the tick itself is not run early).
+        """
         stop = stop or asyncio.Event()
         log.info("homebody running")
         try:
             while not stop.is_set():
                 await self.tick()
-                try:
-                    await asyncio.wait_for(stop.wait(), TICK_SECONDS)
-                except TimeoutError:
-                    pass
+                await self._wait_for_next_tick(stop)
         finally:
             await self._disconnect()
+
+    async def _wait_for_next_tick(self, stop: asyncio.Event) -> None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + TICK_SECONDS
+        while not stop.is_set():
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return
+            waiters = {
+                asyncio.ensure_future(stop.wait()),
+                asyncio.ensure_future(self._publish_requested.wait()),
+            }
+            try:
+                await asyncio.wait(
+                    waiters, timeout=remaining, return_when=asyncio.FIRST_COMPLETED
+                )
+            finally:
+                for waiter in waiters:
+                    waiter.cancel()
+                await asyncio.gather(*waiters, return_exceptions=True)
+            if self._publish_requested.is_set():
+                self._publish_requested.clear()
+                try:
+                    self.publish()
+                except Exception:
+                    log.exception("could not publish status")
 
     async def _refresh_thermostat(self) -> None:
         """Read the thermostat for the status file only; never commands anything."""
