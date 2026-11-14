@@ -64,8 +64,9 @@ homebody run [--config PATH]           # the service loop (what the unit runs)
 `HOMEBODY_CONFIG`) and loops until SIGTERM. Anyone home means Cool at the
 comfort setpoint; everyone gone for the away delay means Cool at the away
 setpoint. It acts once per home/away change, at most one command a minute, and
-leaves the thermostat alone after a hand change until the next home/away
-change. If the controller or thermostat is unreachable it keeps tracking
+a home/away change always takes over, even after a hand change. A hand change
+only holds off other updates (such as a settings change) until the next
+home/away change. If the controller or thermostat is unreachable it keeps tracking
 presence and retries with backoff, then acts on the latest state only.
 
 It keeps a small state file, `state.json`, in the state directory

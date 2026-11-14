@@ -10,7 +10,7 @@ import pytest
 
 from homebody import api, status
 from homebody.people import PeopleError
-from test_daemon import AWAY, COMFORT, MIN, SETPOINT_PATH, WINDOW, A, Rig
+from test_daemon import AWAY, COMFORT, MIN, SETPOINT_PATH, A, Rig
 
 GUARD = {"x-snaphouse": "1"}
 PATH = "/api/homebody/settings"
@@ -163,8 +163,8 @@ def test_changed_setpoints_do_not_beat_a_hand_change_override(tmp_path):
     rig = Rig(tmp_path)
     settle(rig)
     rig.controller.nodes[1]["attributes"][SETPOINT_PATH] = 2389
-    rig.wifi.home = set()
-    rig.run_for(WINDOW + 5 * MIN)
+    rig.daemon.apply_settings({"comfort_f": 73})  # finds the hand change
+    rig.run_for(5 * MIN)
     assert rig.saved()["climate"]["override"] is True
     writes = len(rig.controller.writes())
     rig.daemon.apply_settings({"away_f": 85})

@@ -100,11 +100,12 @@ daemon task; until then nothing runs these probes.
 `climate.py` is pure logic with an injected clock. Occupied is Cool at the comfort
 setpoint, unoccupied is Cool at the away setpoint, and presence "unknown" never
 triggers anything. A command is owed once per occupied/unoccupied transition.
-Before commanding, the thermostat is read and compared with what homebody last
-set (setpoints within 0.25 C count as equal, because the Nest rounds to half
-degrees); a difference is a hand change, so an override is recorded and nothing
-is sent until the next transition, which takes over without re-flagging the hand
-change. Transitions that pile up during an outage collapse, since the target is
+A transition always takes over: its target is sent whatever the thermostat
+reads (a schedule or a person may have moved it). Before a command owed for
+another reason (a settings change), the thermostat is read and compared with
+what homebody last set (setpoints within 0.25 C count as equal, because the Nest
+rounds to half degrees); a difference is a hand change, so an override is
+recorded and nothing is sent until the next transition. Transitions that pile up during an outage collapse, since the target is
 always computed from the latest occupancy. Commands are paced to one a minute
 (the mode and setpoint writes are one command) and failures back off from 60 s
 to 15 min. A write that failed part way is retried without the hand-change

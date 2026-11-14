@@ -50,9 +50,13 @@ Thermostat cluster: system mode Cool and the occupied cooling setpoint.
 
 - Occupied: Cool at 72°F. Unoccupied: Cool at 82°F (Matter does not expose the
   Nest's own Eco mode, so eco is this setpoint).
-- Before each change, homebody reads the current mode and setpoint; if they differ
-  from what homebody last set, a person changed them by hand: record an override
-  and change nothing until the next occupied/unoccupied transition.
+- A home/away transition always sets its target, whatever the thermostat reads.
+  Before any other change (a settings change), homebody reads the current mode and
+  setpoint; if they differ from what homebody last set, a person changed them by
+  hand: record an override and change nothing until the next occupied/unoccupied
+  transition.
+  Changed 2026-11-14 (owner decision): a transition always takes over; a hand
+  change holds only until the next transition.
 - Transitions are acted on once; failures retry with backoff and are logged; the
   thermostat is never sent a command more than once a minute.
 

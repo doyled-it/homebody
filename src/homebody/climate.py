@@ -13,9 +13,11 @@ Rules (from the design):
 - A command is owed once per occupied/unoccupied transition. Transitions that
   pile up while the thermostat is unreachable collapse: the target is always
   computed from the latest occupancy, so only the latest state is ever sent.
-- Before commanding, the thermostat's mode and setpoint are compared with what
-  homebody last set. A difference means a person changed it by hand: record an
-  override and send nothing until the next transition, which takes over again.
+- A transition always takes over: the target is sent whatever the thermostat
+  reads. Before a command owed for another reason (a settings change), the
+  thermostat's mode and setpoint are compared with what homebody last set. A
+  difference means a person changed it by hand: record an override and send
+  nothing until the next transition.
 - Commands are paced to one a minute; failures retry with a growing backoff.
 
 Setpoint comparisons allow a quarter of a degree Celsius. The Nest keeps
@@ -60,7 +62,7 @@ class ClimateState:
     override: bool = False
     # A transition is owed a command.
     pending: bool = False
-    # The transition followed an override: take over without the hand check.
+    # A transition skips the hand check: its target is sent whatever is read.
     takeover: bool = False
     # A command was started and has not finished, so the thermostat may be
     # half-written and must not be read as a hand change.
@@ -149,7 +151,7 @@ class ClimateController:
         if occupied is None or occupied == self.state.occupied:
             return
         s = self.state
-        s.takeover = s.override
+        s.takeover = True
         s.override = False
         s.attempting = False
         s.occupied = occupied
