@@ -29,7 +29,16 @@ from typing import Any
 
 from homebody import matter, status
 from homebody.climate import ClimateController, ClimateState
-from homebody.config import Config
+from homebody.config import Config, Person
+from homebody.people import (
+    MAX_ADDED,
+    PeopleError,
+    clean_mac,
+    clean_name,
+    new_person_id,
+    parse_saved,
+    to_saved,
+)
 from homebody.presence import (
     L2pingBluetoothProbe,
     NeighbourWifiProbe,
@@ -110,6 +119,14 @@ class Daemon:
             clock=clock,
             state=ClimateState.from_dict(saved.get("climate")),
         )
+        self._added: list[Person] = []
+        for person in parse_saved(saved.get("people")):
+            if self._presence.person_for_mac(person.wifi_mac or ""):
+                continue
+            if any(p.id == person.id for p in self._added):
+                continue
+            self._presence.add_person(person)
+            self._added.append(person)
         flags = saved.get("enabled")
         self._enabled: dict[str, bool] = {
             k: v
@@ -206,6 +223,43 @@ class Daemon:
         self._enabled[person_id] = enabled
         self._save()
         return True
+
+    def counted_as(self, wifi_mac: str) -> str | None:
+        """The name this address is already counted as, if any."""
+        person = self._presence.person_for_mac(wifi_mac)
+        return person.name if person else None
+
+    def add_person(self, name: object, wifi_mac: str) -> dict[str, Any]:
+        """Count a phone as a person, keep them, and return the status document."""
+        mac = clean_mac(wifi_mac)
+        existing = self.counted_as(mac)
+        if existing is not None:
+            raise PeopleError(f"This phone is already counted as {existing}.", 409)
+        if len(self._added) >= MAX_ADDED:
+            raise PeopleError(f"Up to {MAX_ADDED} people can be added here.")
+        taken = [p.name for p in self._presence.all_people()]
+        person = Person(clean_name(name, taken), True, mac, None, new_person_id())
+        self._presence.add_person(person)
+        self._added.append(person)
+        self._save_quietly()
+        return self.publish()
+
+    def remove_person(self, person_id: object) -> dict[str, Any]:
+        """Stop counting an added person. Configured people cannot be removed."""
+        if not isinstance(person_id, str) or not self._presence.remove_person(
+            person_id
+        ):
+            raise PeopleError("That person cannot be removed here.")
+        self._added = [p for p in self._added if p.id != person_id]
+        self._enabled.pop(person_id, None)
+        self._save_quietly()
+        return self.publish()
+
+    def _save_quietly(self) -> None:
+        try:
+            self._save()
+        except OSError:
+            log.exception("could not save state")
 
     async def tick(self) -> None:
         """One pass of the loop. Never raises."""
@@ -324,6 +378,7 @@ class Daemon:
         snapshot = {
             "climate": self.climate.state.to_dict(),
             "enabled": dict(sorted(self._enabled.items())),
+            "people": to_saved(self._added),
             "settings": dict(sorted(self._overrides.items())),
         }
         if snapshot != self._saved_snapshot:

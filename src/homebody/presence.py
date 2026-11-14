@@ -52,11 +52,15 @@ class PersonStatus:
     state: str
     signal: str | None
     seconds_since_seen: float | None
+    removable: bool = False
 
 
 class _Tracked:
-    def __init__(self, person: Person, started: float) -> None:
+    def __init__(
+        self, person: Person, started: float, removable: bool = False
+    ) -> None:
         self.person = person
+        self.removable = removable
         self.last_seen: float | None = None
         self.last_wifi_seen: float | None = None
         self.last_signal: str | None = None
@@ -123,6 +127,30 @@ class PresenceTracker:
                 return True
         return False
 
+    def add_person(self, person: Person) -> None:
+        """Track a person added at runtime, observed afresh and removable."""
+        self._tracked.append(_Tracked(person, self._clock(), removable=True))
+
+    def remove_person(self, person_id: str) -> bool:
+        """Stop tracking an added person. False for unknown or configured ids."""
+        for t in self._tracked:
+            if t.person.id == person_id and t.removable:
+                self._tracked.remove(t)
+                return True
+        return False
+
+    def all_people(self) -> list[Person]:
+        """Everyone tracked, enabled or not."""
+        return [t.person for t in self._tracked]
+
+    def person_for_mac(self, mac: str) -> Person | None:
+        """Whoever is tracked with this Wi-Fi address, enabled or not."""
+        wanted = mac.lower()
+        for t in self._tracked:
+            if t.person.wifi_mac and t.person.wifi_mac.lower() == wanted:
+                return t.person
+        return None
+
     def set_away_window(self, seconds: float) -> None:
         """Change how long someone stays home after the last sighting."""
         self._window = seconds
@@ -174,6 +202,7 @@ class PresenceTracker:
                 seconds_since_seen=(
                     now - t.last_seen if t.last_seen is not None else None
                 ),
+                removable=t.removable,
             )
             for t in self._active()
         ]

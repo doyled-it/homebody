@@ -468,3 +468,41 @@ def test_l2ping_failure_and_missing_tool_are_not_seen():
 def test_subprocess_runner_runs_a_real_command():
     rc, out = presence.run_command(["echo", "hi"], timeout=5)
     assert (rc, out.strip()) == (0, "hi")
+
+
+def test_added_person_is_tracked_and_removable():
+    clock, wifi = Clock(), FakeWifi()
+    tracker = presence.PresenceTracker(
+        [Person("Alex", True, "02:00:00:00:00:01", None, "person-1")],
+        wifi=wifi, bluetooth=FakeBluetooth(), clock=clock,
+    )
+    tracker.add_person(Person("Sam", True, "02:00:00:00:00:0a", None, "added-0000000a"))
+    by_id = {s.id: s for s in tracker.statuses()}
+    assert by_id["added-0000000a"].removable is True
+    assert by_id["added-0000000a"].state == presence.UNKNOWN
+    assert by_id["person-1"].removable is False
+    wifi.visible.add("02:00:00:00:00:0a")
+    tracker.poll()
+    states = {s.id: s.state for s in tracker.statuses()}
+    assert states["added-0000000a"] == presence.HOME
+    assert tracker.remove_person("added-0000000a") is True
+    assert [s.id for s in tracker.statuses()] == ["person-1"]
+
+
+def test_configured_person_cannot_be_removed():
+    tracker = presence.PresenceTracker(
+        [Person("Alex", True, "02:00:00:00:00:01", None, "person-1")],
+        wifi=FakeWifi(), bluetooth=FakeBluetooth(), clock=Clock(),
+    )
+    assert tracker.remove_person("person-1") is False
+    assert tracker.remove_person("nobody") is False
+    assert len(tracker.statuses()) == 1
+
+
+def test_counted_as_finds_config_people_ignoring_case():
+    alex = Person("Alex", False, "02:00:00:00:00:0a", None, "person-1")
+    tracker = presence.PresenceTracker(
+        [alex], wifi=FakeWifi(), bluetooth=FakeBluetooth(), clock=Clock(),
+    )
+    assert tracker.person_for_mac("02:00:00:00:00:0A") == alex
+    assert tracker.person_for_mac("02:00:00:00:00:0b") is None
