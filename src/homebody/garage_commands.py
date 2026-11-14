@@ -202,15 +202,17 @@ class CommandGate:
                 ),
                 action, where, actor,
             )
-            model.note_remote_command()
-        if action == "close":
-            model.note_command("close")
         if note is not None:
             await asyncio.wait({note}, timeout=self._note_wait)
 
+        wait = self._close_wait if action == "close" else self._open_wait
+        if tunnel:
+            # the mark lapses on its own if the door never moves for this command
+            model.note_remote_command(window=wait + self._note_wait + 5.0)
         try:
             await self._link.send(action)  # type: ignore[arg-type]
         except LinkError:
+            model.clear_remote_command()
             await self._followup(
                 action, where, actor, "The board refused the command."
             )
@@ -221,10 +223,12 @@ class CommandGate:
         self._audit_line(action, where, actor, "sent")
         self._attrib = (where, actor, self._clock() + ATTRIBUTION_SECONDS)
 
-        wait = self._close_wait if action == "close" else self._open_wait
         if await self._saw_movement(action, wait):
+            if action == "close":
+                model.note_command("close")
             self._audit_line(action, where, actor, "confirmed")
             return "sent"
+        model.clear_remote_command()
         self._audit_line(action, where, actor, "no confirmation")
         self._attrib = None
         self._late = (action, where, actor, self._clock() + LATE_CONFIRM_SECONDS)
@@ -291,10 +295,12 @@ class CommandGate:
         late = self._late
         if late is not None:
             action, origin, actor, until = late
-            moving = "opening" if action == "open" else "closing"
+            moving, end = (
+                ("opening", "open") if action == "open" else ("closing", "closed")
+            )
             if now > until:
                 self._late = None
-            elif new_state == moving:
+            elif new_state in (moving, end):
                 self._late = None
                 self._attrib = (origin, actor, now + ATTRIBUTION_SECONDS)
                 self._audit_line(action, origin, actor, "late confirm")

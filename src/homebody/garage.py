@@ -86,7 +86,8 @@ class GarageModel:
         self._last_seen: float | None = None
         self._last_known: DoorState | None = None
         self._episode: Episode | None = None
-        self._pending_remote = False
+        self._pending_remote_until: float | None = None
+        self._remote_marked: Episode | None = None
         self._obstruction: bool | None = None
         self._lockout: bool | None = None
         self._light: bool | None = None
@@ -263,10 +264,12 @@ class GarageModel:
     def _new_episode(self, started: float, approximate: bool) -> None:
         self._episode = Episode(
             started=started,
-            remote_started=self._pending_remote,
+            remote_started=self._pending_remote_live(),
             since_approximate=approximate,
         )
-        self._pending_remote = False
+        if self._episode.remote_started:
+            self._remote_marked = self._episode
+        self._pending_remote_until = None
 
     def _episode_on_connect(self, derived: DoorState, when: float) -> None:
         if derived == "closed":
@@ -284,12 +287,29 @@ class GarageModel:
 
     # commands
 
-    def note_remote_command(self) -> None:
-        """Mark the current or next episode as started by a remote command."""
+    def _pending_remote_live(self) -> bool:
+        until = self._pending_remote_until
+        return until is not None and self._clock() <= until
+
+    def note_remote_command(self, window: float = 60.0) -> None:
+        """Mark the current episode, or the next one begun within ``window`` seconds.
+
+        An unclaimed mark expires, so a command that never moved the door cannot
+        mark a later episode that someone else started.
+        """
         if self._episode is not None:
+            if not self._episode.remote_started:
+                self._remote_marked = self._episode
             self._episode.remote_started = True
         else:
-            self._pending_remote = True
+            self._pending_remote_until = self._now() + window
+
+    def clear_remote_command(self) -> None:
+        """Undo ``note_remote_command`` after a failed or unconfirmed command."""
+        self._pending_remote_until = None
+        if self._remote_marked is not None and self._remote_marked is self._episode:
+            self._remote_marked.remote_started = False
+        self._remote_marked = None
 
     def note_command(self, action: str) -> None:
         """Record that an accepted command asked for ``action``."""

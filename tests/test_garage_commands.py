@@ -402,3 +402,85 @@ def test_intent_rejects_an_unknown_action(tmp_path):
     with pytest.raises(CommandError) as info:
         env.gate.intent("toggle", "home", None)
     assert info.value.status == 400
+
+
+# Fix round 1: a failed or unconfirmed command must never mark a later episode.
+
+
+def _wall_open_while_away(env):
+    """A wall-button open with nobody home, judged by the real alert rules."""
+    from homebody.garage_alerts import AlertRules
+
+    rules = AlertRules(env.model, env.clock)
+    settings = GarageSettings(remote=True)
+    env.link.fail_send = False
+    env.link.swallow = False
+    env.link.push(operation="opening")
+    assert env.model.episode is not None
+    assert rules.evaluate(False, settings, True) == []
+    env.clock.now += 5 * 60
+    return [a.kind for a in rules.evaluate(False, settings, True)]
+
+
+def test_503_remote_open_then_wall_open_while_away_still_fires_opened_away(tmp_path):
+    env = make(tmp_path)
+    env.link.fail_send = True
+    assert refusal(env, "open", "tunnel", "ab12").status == 503
+    assert _wall_open_while_away(env) == ["opened_away"]
+
+
+def test_504_remote_open_then_wall_open_while_away_still_fires_opened_away(tmp_path):
+    env = make(tmp_path)
+    env.link.swallow = True
+    assert refusal(env, "open", "tunnel", "ab12").status == 504
+    env.clock.now += 61
+    assert _wall_open_while_away(env) == ["opened_away"]
+
+
+def test_confirmed_remote_open_still_suppresses_opened_away(tmp_path):
+    from homebody.garage_alerts import AlertRules
+
+    env = make(tmp_path)
+    go(env, "open", "tunnel", "ab12")
+    rules = AlertRules(env.model, env.clock)
+    settings = GarageSettings(remote=True)
+    rules.evaluate(False, settings, True)
+    env.clock.now += 5 * 60
+    assert "opened_away" not in [a.kind for a in rules.evaluate(False, settings, True)]
+
+
+def test_failed_or_unconfirmed_close_leaves_no_close_commanded_mark(tmp_path):
+    env = make(tmp_path, door="open")
+    env.model.state_received(env.link.state)
+    env.link.fail_send = True
+    assert refusal(env, "close", "home").status == 503
+    assert env.model.episode.close_commanded is False
+    env.link.fail_send = False
+    env.link.swallow = True
+    env.clock.now += 11
+    assert refusal(env, "close", "home").status == 504
+    assert env.model.episode.close_commanded is False
+
+
+def test_failed_remote_open_on_a_stopped_door_leaves_the_episode_unmarked(tmp_path):
+    env = make(tmp_path)
+    env.link.push(operation="idle", position=0.5)
+    assert env.model.episode is not None
+    env.link.fail_send = True
+    assert refusal(env, "open", "tunnel", "ab12").status == 503
+    assert env.model.episode.remote_started is False
+
+
+def test_late_confirm_also_matches_a_first_push_showing_the_end_state(tmp_path):
+    env = make(tmp_path)
+    env.link.swallow = True
+    assert refusal(env, "open", "tunnel", "ab12").status == 504
+    env.clock.now += 20
+    assert env.gate.attribute_change("open") == ("tunnel", "ab12")
+    assert "late confirm" in results(env)
+    env2 = make(tmp_path / "c", door="open")
+    env2.link.swallow = True
+    assert refusal(env2, "close", "home").status == 504
+    env2.clock.now += 20
+    assert env2.gate.attribute_change("closed") == ("home", None)
+    assert "late confirm" in results(env2)

@@ -307,3 +307,51 @@ def test_store_write_failure_raises_oserror_without_touching_other_files(tmp_pat
     assert other.read_text() == '{"climate": true}'
     assert store.load() == {"a": 1}
     assert sorted(p.name for p in tmp_path.iterdir()) == ["garage.json", "state.json"]
+
+
+def test_pending_remote_command_expires_with_its_window():
+    clock = Clock(1000.0)
+    model = connected_model(clock)
+    model.state_received(door("idle", 0.0))
+    model.note_remote_command(window=30.0)
+    clock.now += 31
+    model.state_received(door("opening", 0.1))
+    assert model.episode is not None
+    assert model.episode.remote_started is False
+
+
+def test_pending_remote_command_inside_its_window_marks_the_episode():
+    clock = Clock(1000.0)
+    model = connected_model(clock)
+    model.state_received(door("idle", 0.0))
+    model.note_remote_command(window=30.0)
+    clock.now += 29
+    model.state_received(door("opening", 0.1))
+    assert model.episode is not None
+    assert model.episode.remote_started is True
+
+
+def test_clear_remote_command_drops_the_pending_mark():
+    clock = Clock(1000.0)
+    model = connected_model(clock)
+    model.state_received(door("idle", 0.0))
+    model.note_remote_command()
+    model.clear_remote_command()
+    model.state_received(door("opening", 0.1))
+    assert model.episode is not None
+    assert model.episode.remote_started is False
+
+
+def test_clear_remote_command_unmarks_only_what_the_command_marked():
+    clock = Clock(1000.0)
+    model = connected_model(clock)
+    model.state_received(door("idle", 0.0))
+    model.note_remote_command()
+    model.state_received(door("opening", 0.1))
+    model.clear_remote_command()
+    assert model.episode is not None
+    assert model.episode.remote_started is False
+    model.note_remote_command()
+    model.note_remote_command()
+    model.clear_remote_command()
+    assert model.episode.remote_started is False
