@@ -107,3 +107,29 @@ def test_async_send_runs_off_the_loop(ntfy):
 
     assert asyncio.run(notifier(ntfy).send(ALERT)) is True
     assert len(ntfy.requests) == 1
+
+
+def test_async_send_does_not_block_the_event_loop(ntfy):
+    import asyncio
+
+    ntfy.hang_next()
+
+    async def run():
+        ticks = 0
+        done = asyncio.Event()
+
+        async def ticker():
+            nonlocal ticks
+            while not done.is_set():
+                ticks += 1
+                await asyncio.sleep(0.01)
+
+        task = asyncio.create_task(ticker())
+        ok = await notifier(ntfy).send(ALERT)
+        done.set()
+        await task
+        return ok, ticks
+
+    ok, ticks = asyncio.run(run())
+    assert ok is True
+    assert ticks > 5

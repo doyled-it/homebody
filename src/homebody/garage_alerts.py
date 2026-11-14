@@ -34,6 +34,8 @@ KINDS = (
     "remote_note_followup",
 )
 
+EXEMPT_KINDS = ("remote_note", "remote_note_followup")
+
 EPISODE_KINDS = ("left_open", "left_open_reminder", "opened_away", "left_open_away")
 
 REMINDER_AFTER_MINUTES = 60
@@ -315,6 +317,8 @@ class AlertRules:
         if alert.kind == "paused":
             self._paused_at = now
             self._paused_pending = False
+            return
+        if alert.kind in EXEMPT_KINDS:
             return
         self._sent_times.append(now)
         self._apply(alert, target, sent=True)

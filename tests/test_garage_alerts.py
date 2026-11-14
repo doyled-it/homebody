@@ -308,3 +308,130 @@ def test_clock_stepping_back_fires_nothing_early():
     rig.open()
     rig.clock.advance(-30)
     assert rig.evaluate() == []
+
+
+# Added after the mutation check: each pins a behaviour a mutant survived on.
+
+
+def test_reminder_is_60_minutes_after_the_left_open_threshold():
+    rig = Rig()
+    rig.open()
+    rig.clock.advance(15)
+    rig.deliver()
+    rig.clock.advance(59)
+    assert rig.deliver() == []
+    rig.clock.advance(1)
+    assert rig.deliver() == ["left_open_reminder"]
+
+
+def test_reminder_scales_with_n():
+    rig = Rig(GarageSettings(left_open_minutes=30))
+    rig.open()
+    rig.clock.advance(30)
+    rig.deliver()
+    rig.clock.advance(59)
+    assert rig.deliver() == []
+    rig.clock.advance(1)
+    assert rig.deliver() == ["left_open_reminder"]
+
+
+def test_reminder_never_arrives_with_or_before_the_first_alert():
+    rig = Rig()
+    rig.open()
+    rig.clock.advance(200)
+    assert kinds(rig.evaluate()) == ["left_open"]
+
+
+def test_opened_away_needs_occupied_false_when_it_comes_due():
+    rig = Rig()
+    rig.open()
+    rig.evaluate(occupied=False)
+    rig.clock.advance(10)
+    assert "opened_away" not in kinds(rig.evaluate(occupied=None))
+
+
+def test_opened_away_not_judged_when_presence_unknown_at_open():
+    rig = Rig(GarageSettings(away_open_grace_minutes=0))
+    rig.open()
+    rig.evaluate(occupied=None)
+    rig.clock.advance(10)
+    assert "opened_away" not in kinds(rig.evaluate(occupied=False))
+
+
+def test_left_open_away_still_fires_after_left_open_was_sent():
+    rig = Rig()
+    rig.open()
+    rig.evaluate(occupied=True)
+    rig.clock.advance(15)
+    assert rig.deliver(occupied=True) == ["left_open"]
+    rig.clock.advance(5)
+    (alert,) = rig.evaluate(occupied=False)
+    assert alert.kind == "left_open_away"
+    assert "20 minutes" in alert.body
+
+
+def test_unknown_presence_in_between_does_not_forget_someone_was_home():
+    rig = Rig()
+    rig.open()
+    rig.evaluate(occupied=True)
+    rig.clock.advance(1)
+    assert rig.evaluate(occupied=None) == []
+    rig.clock.advance(1)
+    assert kinds(rig.evaluate(occupied=False)) == ["left_open_away"]
+
+
+def _fill_cap(rig):
+    for _ in range(6):
+        rig.open()
+        rig.clock.advance(1)
+        rig.deliver()
+        rig.model.note_command("close")
+        rig.close()
+        rig.deliver()
+        rig.clock.advance(1)
+
+
+def test_dropped_overflow_alert_is_not_offered_again_when_the_hour_passes():
+    rig = Rig(GarageSettings(left_open_minutes=1))
+    _fill_cap(rig)
+    rig.open()
+    rig.clock.advance(1)
+    for alert in rig.evaluate():
+        rig.rules.mark_sent(alert)
+    rig.clock.advance(120)
+    assert "left_open" not in kinds(rig.evaluate())
+
+
+def test_paused_note_does_not_use_up_a_cap_slot():
+    rig = Rig(GarageSettings(left_open_minutes=1))
+    _fill_cap(rig)
+    rig.open()
+    rig.clock.advance(1)
+    for alert in rig.evaluate():
+        rig.rules.mark_sent(alert)
+    rig.model.note_command("close")
+    rig.close()
+    rig.clock.advance(50)
+    rig.open()
+    rig.clock.advance(1)
+    # the first of the six sent alerts is now over an hour old: one slot is free
+    assert kinds(rig.evaluate()) == ["left_open"]
+
+
+def test_mark_dropped_stops_an_alert_being_offered_again():
+    rig = Rig()
+    rig.open()
+    rig.clock.advance(15)
+    (alert,) = rig.evaluate()
+    rig.rules.mark_dropped(alert)
+    rig.clock.advance(1)
+    assert rig.evaluate() == []
+
+
+def test_remote_command_notes_do_not_count_against_the_cap():
+    rig = Rig()
+    for kind in ("remote_note", "remote_note_followup") * 5:
+        rig.rules.mark_sent(Alert(kind, "t", "b", "default"))
+    rig.open()
+    rig.clock.advance(15)
+    assert kinds(rig.evaluate()) == ["left_open"]
