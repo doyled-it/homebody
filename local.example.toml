@@ -52,3 +52,34 @@ node_id = 0
 # # /api/homebody/ to it. Settings changed through the API are kept in the daemon
 # # state and win over the [climate] values above, which stay read-only.
 # port = 8783
+
+#
+# The garage door module (src/homebody/garage*.py). Leave [garage] out and the
+# module is off. A bad [garage] turns only the garage off and logs why (the
+# field, never its value). The board's host, its encryption key, the ntfy
+# address and topic, and the house page address live only in the local copy.
+#
+# [garage]
+# host = "<board-address-or-mdns-name>"
+# port = 6053
+# # The ESPHome API encryption key. The stock blaQ config has no key set, so set
+# # one on the board first. Without noise_psk the link is refused unless you
+# # also set allow_plaintext = true, which is logged at every start.
+# noise_psk = "<base64-32-byte-key>"
+# allow_plaintext = false
+# page_url = "<url-of-the-house-page>"        # the tunnel hostname, for ntfy clicks
+# # Partial overrides merge over the stock names; Lock is the remote lockout.
+# entity_names = { cover = "Garage Door", obstruction = "Obstruction", lockout = "Lock" }
+# close_wait_seconds = 30     # how long a close waits for the door to move (max 60)
+# open_wait_seconds = 10      # the same for an open
+# note_wait_seconds = 5       # how long a remote command waits on its ntfy note
+# left_open_minutes = 15      # default for the left-open alert (0 turns it off)
+# away_open_grace_minutes = 5 # default arrival grace for the opened-away alert
+#
+# [garage.ntfy]
+# url = "<ntfy-server-url>"
+# topic = "<ntfy-topic>"
+# token = "<ntfy-access-token>"               # optional
+#
+# [garage.actors]                              # optional labels for audit tags
+# "<tag>" = "<display label>"

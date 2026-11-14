@@ -92,6 +92,7 @@ class GarageModel:
         self._lockout: bool | None = None
         self._light: bool | None = None
         self._position: float | None = None
+        self._has_position = False
         self.changes: list[tuple[float, DoorState]] = []
         self._restore(saved if isinstance(saved, dict) else {})
 
@@ -186,7 +187,7 @@ class GarageModel:
 
     @property
     def position_percent(self) -> int | None:
-        if self._position is None:
+        if self._position is None or not self._has_position:
             return None
         return round(self._position * 100)
 
@@ -224,6 +225,7 @@ class GarageModel:
         self._lockout = None
         self._light = None
         self._position = None
+        self._has_position = False
 
     def state_received(self, link: LinkState) -> None:
         if not self._connected:
@@ -240,6 +242,7 @@ class GarageModel:
         if derived is None:
             return
         self._position = link.position
+        self._has_position = link.has_position
         first = self._awaiting_door
         self._awaiting_door = False
         previous = self._last_known

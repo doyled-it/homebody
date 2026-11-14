@@ -425,3 +425,70 @@ def test_add_person_with_an_invalid_address_is_400(tmp_path):
         rig.daemon.add_person("Sam", "not-a-mac")
     assert e.value.status == 400
     assert rig.daemon.counted_as("not-a-mac") is None
+
+
+# The garage settings and the garage key of the document
+
+
+def test_garage_settings_persist_and_do_not_appear_in_climate_settings(tmp_path):
+    rig = Rig(tmp_path)
+    document = rig.daemon.apply_settings(
+        {"garage_left_open_minutes": 30, "garage_remote": True, "comfort_f": 70}
+    )
+    assert document["settings"] == {
+        "comfort_f": 70, "away_f": 82, "away_minutes": 20}
+    assert rig.saved()["settings"] == {
+        "comfort_f": 70, "garage_left_open_minutes": 30, "garage_remote": True}
+    fresh = rig.new_daemon()
+    g = fresh.garage_settings()
+    assert (g.left_open_minutes, g.away_open_grace_minutes) == (30, 5)
+    assert (g.alerts, g.remote) == (True, True)
+    assert "garage_remote" in fresh.settings()
+
+
+def test_garage_settings_default_from_the_garage_config(tmp_path):
+    from homebody.config import GarageConfig
+
+    garage = GarageConfig(host="h", left_open_minutes=22, away_open_grace_minutes=1)
+    rig = Rig(tmp_path, garage=garage)
+    g = rig.daemon.garage_settings()
+    assert (g.left_open_minutes, g.away_open_grace_minutes) == (22, 1)
+    assert (g.alerts, g.remote) == (True, False)
+
+
+def test_damaged_garage_settings_in_state_are_dropped(tmp_path):
+    (tmp_path / STATE_FILE).write_text(json.dumps({"settings": {
+        "garage_left_open_minutes": 9999,
+        "garage_away_open_grace_minutes": "5",
+        "garage_alerts": 1,
+        "garage_remote": "yes",
+        "comfort_f": 70,
+    }}))
+    rig = Rig(tmp_path)
+    g = rig.daemon.garage_settings()
+    assert (g.left_open_minutes, g.away_open_grace_minutes) == (15, 5)
+    assert (g.alerts, g.remote) == (True, False)
+    assert rig.daemon.settings()["comfort_f"] == 70
+
+
+def test_failing_garage_snapshot_publishes_null_and_climate_fields(tmp_path):
+    rig = Rig(tmp_path)
+    rig.tick()
+
+    def boom():
+        raise RuntimeError("link exploded")
+
+    rig.daemon.attach_garage(boom)
+    document = rig.daemon.publish()
+    assert document["garage"] is None
+    assert document["settings"]["comfort_f"] == 72
+    assert document["people"]
+
+
+def test_attached_garage_source_fills_the_document(tmp_path):
+    rig = Rig(tmp_path)
+    assert rig.daemon.status_document()["garage"] is None
+    rig.daemon.attach_garage(lambda: {"link": {"connected": True}})
+    assert rig.daemon.status_document()["garage"] == {"link": {"connected": True}}
+    rig.daemon.attach_garage(lambda: None)
+    assert rig.daemon.status_document()["garage"] is None

@@ -1,0 +1,24 @@
+{
+  "garage": {
+    "link": {"connected": true, "last_seen": "2026-11-14T18:02:11Z"},
+    "door": {
+      "state": "closed",
+      "since": "2026-11-14T17:40:03Z",
+      "since_approximate": false,
+      "position": 0,
+      "last_known_state": "closed"
+    },
+    "obstruction": false,
+    "lockout": false,
+    "light": false,
+    "settings": {
+      "left_open_minutes": 15,
+      "away_open_grace_minutes": 5,
+      "alerts": true,
+      "remote": true
+    },
+    "recent": [
+      {"at": "2026-11-14T17:40:03Z", "event": "closed", "origin": "home", "who": null}
+    ]
+  }
+}

@@ -10,11 +10,12 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from homebody.garage import GarageModel, GarageSettings
 from homebody.presence import PersonStatus
 
 VERSION = 1
@@ -43,6 +44,7 @@ def build_document(
     override: bool,
     last_change: dict[str, Any] | None,
     settings: dict[str, Any],
+    garage: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "version": VERSION,
@@ -81,7 +83,70 @@ def build_document(
             }
         ),
         "settings": dict(settings),
+        "garage": garage,
     }
+
+
+RECENT_LIMIT = 10
+
+
+def _past(timestamp: float | None, now: float) -> str | None:
+    """A stored time as UTC text, never later than ``now`` (clock steps)."""
+    return None if timestamp is None else iso(min(timestamp, now))
+
+
+def build_garage(
+    model: GarageModel,
+    settings: GarageSettings,
+    recent: Sequence[Mapping[str, Any]],
+    labels: Mapping[str, str],
+    now: float,
+) -> dict[str, Any]:
+    """The ``garage`` key of the document.
+
+    ``recent`` holds audit door-change entries, oldest first. ``who`` is a label
+    from ``labels`` for a tunnel command's tag, else the bare tag; never an email.
+    """
+    state = model.state
+    known = state != "unknown"
+    return {
+        "link": {
+            "connected": model.connected,
+            "last_seen": _past(model.last_seen, now),
+        },
+        "door": {
+            "state": state,
+            "since": _past(model.since, now) if known else None,
+            "since_approximate": model.since_approximate if known else False,
+            "position": model.position_percent if known else None,
+            "last_known_state": model.last_known_state,
+        },
+        "obstruction": model.obstruction,
+        "lockout": model.lockout,
+        "light": model.light,
+        "settings": {
+            "left_open_minutes": settings.left_open_minutes,
+            "away_open_grace_minutes": settings.away_open_grace_minutes,
+            "alerts": settings.alerts,
+            "remote": settings.remote,
+        },
+        "recent": [
+            {
+                "at": entry.get("at"),
+                "event": entry.get("event"),
+                "origin": entry.get("origin"),
+                "who": _who(entry, labels),
+            }
+            for entry in list(recent)[-RECENT_LIMIT:]
+        ],
+    }
+
+
+def _who(entry: Mapping[str, Any], labels: Mapping[str, str]) -> str | None:
+    tag = entry.get("actor")
+    if entry.get("origin") != "tunnel" or not isinstance(tag, str) or "@" in tag:
+        return None
+    return labels.get(tag, tag)
 
 
 class StatusWriter:
