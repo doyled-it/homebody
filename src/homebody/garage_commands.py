@@ -24,6 +24,8 @@ NONCE_SECONDS = 30
 MIN_GAP_SECONDS = 10.0
 TUNNEL_PER_HOUR = 6
 HOUR = 3600.0
+INTENTS_PER_MINUTE = 10
+MINUTE = 60.0
 LATE_CONFIRM_SECONDS = 60.0
 ATTRIBUTION_SECONDS = 120.0
 POLL_SECONDS = 0.02
@@ -67,6 +69,7 @@ class CommandGate:
         self._nonces: dict[str, tuple[str, float]] = {}
         self._last_accept: float | None = None
         self._tunnel_accepts: list[float] = []
+        self._intents: dict[str, list[float]] = {}
         self._tasks: set[asyncio.Task[Any]] = set()
         self._late: tuple[str, Origin, str | None, float] | None = None
         self._attrib: tuple[Origin, str | None, float] | None = None
@@ -80,6 +83,13 @@ class CommandGate:
         self._nonces = {
             n: (a, exp) for n, (a, exp) in self._nonces.items() if exp > now
         }
+        caller = actor if origin != "home" and actor else origin
+        recent = [t for t in self._intents.get(caller, []) if 0 <= now - t < MINUTE]
+        if len(recent) >= INTENTS_PER_MINUTE:
+            self._intents[caller] = recent
+            raise CommandError(429, "Too many requests. Wait a moment.")
+        recent.append(now)
+        self._intents[caller] = recent
         nonce = secrets.token_urlsafe(16)
         self._nonces[nonce] = (action, now + NONCE_SECONDS)
         return {

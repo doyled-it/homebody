@@ -569,10 +569,19 @@ All tests run on any dev machine with `uv run pytest`, no hardware, no network.
 8. Safety: from the page, close the door while watching it. Confirm the beeps and flashing
    lights happen before it moves, and test the obstruction sensor and the remote
    lockout behavior (both should block the command with a clear message).
-9. Tunnel: from a phone on mobile data, confirm an anonymous request to the API gets the
-   Access login, then log in, turn `garage_remote` on at home, and run an open and close
-   with the confirm. Each should produce a note and an audit line, with origin `tunnel`.
-10. Read `garage-audit.log` and `homebody.json`; confirm there are no emails or addresses.
+9. Tunnel classification, before `garage_remote` is switched on: from a phone on mobile
+   data (away from the house), confirm an anonymous request to the API gets the Access
+   login, then log in and open the Garage card. A real request through the tunnel must be
+   classified as tunnel: the card shows the away confirm note, and the `garage-audit.log`
+   line for that request records origin `tunnel`. If the card treats the request as home,
+   stop: the nginx origin header is not being set from the Cloudflare headers, so do not
+   enable remote control until that is fixed.
+10. Only then turn `garage_remote` on at home, and run an open and close from the phone
+    with the confirm. Each should produce a note and an audit line, with origin `tunnel`.
+11. Read `garage-audit.log` and `homebody.json`; confirm there are no emails or addresses.
+    `aioesphomeapi` can log warnings or errors that carry the board's address. These go to
+    the hub's local journal only (ruling R-T7); they never reach the repo or the status
+    file. Do not paste journal output into a ticket or a chat without checking it first.
 
 ## What is left to the builder
 

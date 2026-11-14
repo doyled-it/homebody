@@ -484,3 +484,32 @@ def test_late_confirm_also_matches_a_first_push_showing_the_end_state(tmp_path):
     env2.clock.now += 20
     assert env2.gate.attribute_change("closed") == ("home", None)
     assert "late confirm" in results(env2)
+
+
+def test_intent_is_rate_limited_per_caller(tmp_path):
+    from homebody.garage_commands import INTENTS_PER_MINUTE
+
+    env = make(tmp_path)
+    for _ in range(INTENTS_PER_MINUTE):
+        env.gate.intent("open", "tunnel", "ab12")
+    with pytest.raises(CommandError) as info:
+        env.gate.intent("open", "tunnel", "ab12")
+    assert info.value.status == 429
+    # another caller is not affected
+    env.gate.intent("open", "tunnel", "cd34")
+    env.gate.intent("open", "home", None)
+    # the window slides
+    env.clock.now += 61
+    env.gate.intent("open", "tunnel", "ab12")
+
+
+def test_intent_cap_bounds_the_nonce_table(tmp_path):
+    from homebody.garage_commands import INTENTS_PER_MINUTE
+
+    env = make(tmp_path)
+    for _ in range(INTENTS_PER_MINUTE + 5):
+        try:
+            env.gate.intent("close", "home", None)
+        except CommandError:
+            pass
+    assert len(env.gate._nonces) == INTENTS_PER_MINUTE

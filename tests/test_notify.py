@@ -133,3 +133,56 @@ def test_async_send_does_not_block_the_event_loop(ntfy):
     ok, ticks = asyncio.run(run())
     assert ok is True
     assert ticks > 5
+
+
+def test_shutdown_does_not_wait_for_a_send_stuck_in_backoff():
+    import asyncio
+    import threading
+    import time
+
+    gate = threading.Event()
+
+    class Failing(Notifier):
+        def _attempt(self, alert):
+            return False
+
+    cfg = NtfyConfig(url="http://127.0.0.1:1", topic="t")
+
+    async def run():
+        n = Failing(cfg, retries=3, sleep=lambda s: gate.wait(20))
+        task = asyncio.create_task(n.send(ALERT))
+        await asyncio.sleep(0.1)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    started = time.monotonic()
+    try:
+        asyncio.run(run())
+        elapsed = time.monotonic() - started
+    finally:
+        gate.set()
+    assert elapsed < 3.0
+
+
+def test_cancelled_send_stops_retrying():
+    import asyncio
+
+    calls = []
+
+    class Failing(Notifier):
+        def _attempt(self, alert):
+            calls.append(1)
+            return False
+
+    cfg = NtfyConfig(url="http://127.0.0.1:1", topic="t")
+
+    async def run():
+        n = Failing(cfg, retries=3)
+        task = asyncio.create_task(n.send(ALERT))
+        await asyncio.sleep(0.1)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await asyncio.sleep(0.2)
+
+    asyncio.run(run())
+    assert len(calls) == 1

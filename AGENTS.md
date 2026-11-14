@@ -238,8 +238,8 @@ off, and it can only be turned on from the house).
 No-retry and no-auto-close rules: nothing moves a door without a person. A
 command asks for an end state (never a toggle), is never retried, and there is
 no automatic close. A command needs a fresh single-use nonce (30 s), the
-tunnel is limited to 1 command per 10 s and 6 per hour, and a remote command
-sends an ntfy note first. ntfy buttons are `view` links only. The state is
+tunnel is limited to 1 command per 10 s and 6 per hour, intents are capped at 10 per
+minute per caller, and a remote command sends an ntfy note first. ntfy buttons are `view` links only. The state is
 `unknown` whenever the link is down or no state has arrived since connect;
 `closed` is never shown without a live link.
 

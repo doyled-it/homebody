@@ -355,3 +355,17 @@ def test_clear_remote_command_unmarks_only_what_the_command_marked():
     model.note_remote_command()
     model.clear_remote_command()
     assert model.episode.remote_started is False
+
+
+def test_link_drop_clears_lockout_and_obstruction_separately():
+    clock = Clock()
+    model = connected_model(clock)
+    model.state_received(door("idle", 0.0, lockout=True))
+    assert model.lockout is True
+    model.link_changed(False)
+    assert model.lockout is None
+    model.link_changed(True)
+    model.state_received(door("idle", 0.0, obstruction=True))
+    assert model.obstruction is True
+    model.link_changed(False)
+    assert model.obstruction is None
