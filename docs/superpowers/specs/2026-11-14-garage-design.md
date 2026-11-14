@@ -120,7 +120,10 @@ defaults from the public konnected-io ESPHome config; confirm on install day):
 | Light | light | shown on the card, no control in v1 |
 | Motion | binary sensor | read and ignored in v1 |
 
-A small adapter class (`GarageLink`, a Protocol) hides the library. The module talks only
+The cover may or may not report an intermediate position (builder's call to plan for
+both shapes). The plan's first task verifies the real blaQ entity list against the public
+konnected-io ESPHome config and pins it in a test fixture; the fake board serves both
+shapes. A small adapter class (`GarageLink`, a Protocol) hides the library. The module talks only
 to the Protocol, so tests use a fake.
 
 ### homebody garage module
@@ -144,7 +147,10 @@ link. The two meet in three places only, all non-blocking:
 1. The garage task reads occupancy with `Daemon.occupied()` (a cheap read) and watches for
    transitions itself, by comparing the value each pass.
 2. The tick's `publish()` includes `garage.snapshot()`, a plain dict copy built under
-   try/except; if it fails the key is `null` and the climate fields still publish.
+   try/except; if it fails the key is `null` and the climate fields still publish. When
+   the door changes, the garage task sets an event that asks the daemon to publish early;
+   the garage never writes `homebody.json` itself, so there is one writer (controller's
+   call).
 3. The API handler calls `garage.command(...)`, which has its own timeout.
 
 The garage task runs inside a supervisor: it catches every exception, logs it, and
@@ -190,7 +196,7 @@ climate. Alerts have a title, a body, a priority and a click URL (the Garage tab
 | Kind | Fires when | De-dup | Priority (proposed) |
 |---|---|---|---|
 | `left_open` | open episode age reaches N minutes (default 15, Owner's placeholder, editable on the page) | once per episode, one reminder at +60 min if still open | default; high if occupied is false |
-| `opened_away` | door leaves `closed` while occupied is false | once per episode | high |
+| `opened_away` | door left `closed` while occupied was false, and nobody became home within the arrival grace (default 5 min, Owner decision) | once per episode | high |
 | `left_open_away` | occupied goes true to false while the door is not closed | once per episode | high |
 
 Notes:
@@ -201,23 +207,35 @@ Notes:
 - If `left_open_away` and `left_open` would both fire in one episode, only the first sends;
   the second is folded into it. The body of `left_open_away` says how long the door has
   been open.
-- `opened_away` has a known false positive: a household member arriving home may open the
-  door before their phone has rejoined Wi-Fi. The Owner asked for an instant alert, so v1
-  has no delay. Proposed: a setting `away_open_grace_seconds`, default 0, so the builder
-  or owner can add a short grace if it proves noisy.
-- A low-priority "Garage closed" note follows any alert for that episode, once, so the
-  owner knows it resolved. Proposed.
+- **Arrival grace (Owner decision).** A household member arriving home may open the door
+  before their phone has rejoined Wi-Fi. The owner asked for a grace longer than two
+  minutes ("5-10"), so `opened_away` waits `garage_away_open_grace_minutes` (default 5,
+  range 0 to 15, editable on the page). If occupied becomes true within the grace, no
+  alert. So by the owner's choice this alert arrives about 5 minutes after the opening.
+- An episode started by an accepted tunnel command does not fire `opened_away`; the
+  remote-command note covers it (controller's call).
+- A low-priority "Garage closed" note follows an alert for that episode, once, so the
+  owner knows it resolved. It is not sent after a commanded close, since the command note
+  already says so (controller's call).
 - **Link alerts.** One "Garage board offline" alert after the link has been down 10
   minutes (proposed), once per outage, with a "back online" note. Short drops (under the
   10 minutes) never page.
 - **Remote command notes** (Owner decision 5): every open or close accepted from the tunnel
-  sends a note at once ("Garage open requested from away"), then a second line in the same
-  topic only if the board refuses or does not confirm. Commands from home do not notify.
+  sends a note ("Garage open requested from away"), then a second line in the same topic
+  only if the board refuses or does not confirm. Commands from home do not notify.
+  Controller's call: tunnel commands are refused (409, clear message) when ntfy is not
+  configured. The note is started first, asynchronously, and the command goes to the board
+  once it is sent or after about 5 s, whichever is first. If delivery then fails after
+  retries the command still proceeds (the person tapping knows) and the audit log records
+  "note failed".
 - **Flap guard.** A global cap of 6 notifications per hour (proposed). Past it, one
   "Garage alerts paused for the hour" note goes out, and the rest are dropped and logged.
   The cap does not apply to remote command notes (those are the audit trail).
 - **Restart.** The fired kinds per episode, and the episode start, are saved in
   `garage.json`. A restart must not re-send an alert already sent for the same episode.
+  If the saved state says an episode was open and the board still reports non-closed after
+  the restart, the saved episode start and fired kinds are kept; otherwise a new episode
+  starts at connect time with `since_approximate` true (controller's call).
 - ntfy action buttons are links to the page only. They never perform the close (the ntfy
   app has no Cloudflare Access session). The notification click target is the Garage tab
   URL from config. A `view` action and the default click both open it.
@@ -235,7 +253,7 @@ header applies. Each response is the full status document, like the people endpo
 |---|---|---|
 | `POST /api/homebody/garage/intent` | `{"action": "open" or "close"}` | Start a command. Returns `{nonce, expires_in, confirm_required}` (30 s) |
 | `POST /api/homebody/garage/command` | `{"action", "nonce"}` | Run it, once, if the nonce is valid |
-| `POST /api/homebody/settings` | `garage_left_open_minutes`, `garage_alerts`, `garage_remote` | Existing endpoint, new keys |
+| `POST /api/homebody/settings` | `garage_left_open_minutes`, `garage_away_open_grace_minutes`, `garage_alerts`, `garage_remote` | Existing endpoint, new keys |
 
 Errors (proposed): 403 (missing guard header, remote control off, tunnel request without
 the Access marker, or remote enabling of remote control), 409 (obstruction reported,
@@ -251,8 +269,11 @@ Command semantics:
 - `close` is refused while the board reports obstruction. `open` with obstruction active
   is allowed (opening is the safe direction); builder's call to refuse it too.
 - Refused while remote lockout is on. homebody does not clear it. The card says why.
-- After sending, homebody waits up to 10 s for the board to report `opening` or
-  `closing`. No confirmation returns 504. **There is no automatic retry**, because a retry
+- After sending, homebody waits for the board to report `opening` or `closing`: up to 30 s
+  for close (Security+ 2.0 sounds a pre-close warning first) and 10 s for open, both config
+  keys (controller's call). No confirmation returns 504. A movement that shows up after
+  the timeout is audited as "late confirm" and published; the page says "No movement seen
+  yet. Check the card before trying again." on a timeout. **There is no automatic retry**, because a retry
   could move a door a person already stopped.
 - The nonce is single use, tied to the action, held in memory, and dies on restart. The
   command endpoint takes no action without it.
@@ -275,16 +296,16 @@ module is off, and the page hides the tab then.
   "obstruction": false,
   "lockout": false,
   "light": false,
-  "settings": {"left_open_minutes": 15, "alerts": true, "remote": true},
+  "settings": {"left_open_minutes": 15, "away_open_grace_minutes": 5, "alerts": true, "remote": true},
   "recent": [
-    {"at": "2026-11-14T17:40:03Z", "event": "closed", "origin": "home", "who": "A"}
+    {"at": "2026-11-14T17:40:03Z", "event": "closed", "origin": "home", "who": null}
   ]
 }
 ```
 
 Rules: every key always present, null when unknown (same rule as today); timestamps are
 UTC whole seconds; `state` is `unknown` when `link.connected` is false; `position` is 0 to
-100 or null; `recent` holds the last 10 audit entries, `who` is a label from local config
+100 or null; `recent` holds the last 10 audit entries, `who` is null for home commands (the card shows "from home") and, for tunnel commands, a label from local config
 or a short tag, never an email or address. The "N min ago" and "for how long" text is
 computed by the page from `updated` and the timestamps.
 
@@ -296,11 +317,13 @@ supplies defaults; the API overrides). New keys:
 | Key | Default | Range | Notes |
 |---|---|---|---|
 | `garage_left_open_minutes` | 15 | 0 to 240 | 0 turns the rule off |
+| `garage_away_open_grace_minutes` | 5 | 0 to 15 | arrival grace for `opened_away` (Owner decision) |
 | `garage_alerts` | true | bool | master switch for ntfy alerts, not for remote notes |
 | `garage_remote` | false | bool | allow commands from the tunnel; turning it ON is refused from the tunnel |
 
-`garage_remote` defaults off in config (proposed), so the owner turns it on deliberately
-on install day. Turning it off is allowed from anywhere, so it works as a kill switch.
+`garage_remote` defaults off. The owner already wants remote control; the default is a safe
+install state, not a product limit, and it is switched on at home during install-day
+bring-up, after the Access check passes. Turning it off is allowed from anywhere, so it works as a kill switch.
 
 ### Page card behavior (lands in snaphouse)
 
@@ -317,6 +340,7 @@ pure `garage-model.js` (like `climate-model.js`) and its tests.
  |  Opener link: connected                  |
  +------------------------------------------+
  Alert me if left open for [ 15 ] min   (saved)
+ Alert if opened while away, after [ 5 ] min
  Allow open and close from away   [ on ]
  Recent
    17:40  Closed   (from home)
@@ -356,7 +380,9 @@ Unknown:
 1. **Garage tab**: `roles/room_picker/files/site/` gets `garage-model.js`, the card in
    `index.html`/`rooms.js`, `nav-model.js` gets the tab (hidden when `garage` is null),
    styles, tests. The nav bar becomes up to six tabs; check the 360 px layout.
-2. **nginx**: in `roles/homebody_bootstrap/templates/homebody.conf.j2`, mark each request
+2. **nginx** (ships and deploys before the homebody garage PR merges; controller's call.
+   The garage uses only the new `X-Snaphouse-Origin` header, and a missing header means
+   tunnel): in `roles/homebody_bootstrap/templates/homebody.conf.j2`, mark each request
    as home or tunnel and overwrite any client-sent marker:
 
    ```
@@ -482,7 +508,7 @@ not, do not enable `garage_remote` until that is resolved. This is unverified to
 | Hub down | No alerts and no status. A dead-man check is out of scope for v1 (a known gap) |
 | Presence unknown (after restart) | Away rules do not fire; `left_open` still does |
 | Power loss and return | Opener reports state on reconnect; `since` becomes approximate |
-| Opener unresponsive after a command | 504 after 10 s; no retry; audit line "no confirmation" |
+| Opener unresponsive after a command | 504 after the confirm window; no retry; audit line "no confirmation" |
 | Obstruction mid-close | The opener itself reverses; the card shows the new state and the obstruction line |
 | Two people tap at once | Second sees a 200 no-op or a 409 "already moving" |
 | State file damaged | Starts fresh; alert de-dup resets, so at most one repeat alert per open episode |
@@ -502,6 +528,9 @@ All tests run on any dev machine with `uv run pytest`, no hardware, no network.
   covers the adapter, the only code that cannot be covered with the in-memory fake, the
   same split as the Matter fake and the loopback WebSocket test.
 - **Fake ntfy.** A loopback HTTP server that records requests, and can fail or hang.
+- **Grace tests**: `opened_away` fires after the grace only if nobody became home, never
+  when occupied flips true inside it; grace 0 fires at once; a tunnel-commanded episode
+  does not fire it.
 - **Pure logic tests** on `garage.py` with an injected clock: state derivation, `since`,
   episodes, every alert rule, de-dup, reminder timing, restart restore, flap cap,
   command checks (obstruction, lockout, unknown, no-op, nonce reuse and expiry).
@@ -558,7 +587,7 @@ The builder may decide, and should record the decision in the PR:
   numbers (the values here are proposals).
 - Whether `open` with an obstruction is refused; whether to bump the status `version`.
 - Whether to add Access JWT verification, and where to keep the keys.
-- Whether `opened_away` gets a default grace period, and the exact alert wording.
+- The exact alert wording.
 - How the nginx `geo`/`map` is laid out and where it is included.
 - Page copy, the tab icon and the exact layout, within the house page's design rules.
 - Audit rotation sizes and the actor-tag scheme.
