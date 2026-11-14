@@ -169,22 +169,35 @@ def test_away_after_everyone_leaves(tmp_path):
     assert rig.setpoint() == AWAY
 
 
-def test_review_focus_3_manual_change_is_held_until_the_next_transition(tmp_path):
+def test_review_focus_3_a_transition_takes_over_a_manual_change(tmp_path):
     rig = Rig(tmp_path)
     rig.wifi.home = {A.wifi_mac}
     rig.run_for(5 * MIN)
     # A person turns the Nest to 75 F (2389) by hand.
     rig.controller.nodes[1]["attributes"][SETPOINT_PATH] = 2389
-    writes_before = len(rig.controller.writes())
     rig.wifi.home = set()
-    rig.run_for(WINDOW + 5 * MIN)  # everyone leaves: a transition, but held
+    rig.run_for(WINDOW + 5 * MIN)  # everyone leaves: the transition takes over
+    assert rig.setpoint() == AWAY
+    assert rig.saved()["climate"]["override"] is False
+
+
+def test_review_focus_3_manual_change_holds_a_settings_change_until_the_next_transition(
+    tmp_path,
+):
+    rig = Rig(tmp_path)
+    rig.wifi.home = {A.wifi_mac}
+    rig.run_for(5 * MIN)
+    rig.controller.nodes[1]["attributes"][SETPOINT_PATH] = 2389
+    writes_before = len(rig.controller.writes())
+    rig.daemon.apply_settings({"comfort_f": 73})  # owes a command
+    rig.run_for(5 * MIN)
     assert rig.setpoint() == 2389
     assert len(rig.controller.writes()) == writes_before
     assert rig.saved()["climate"]["override"] is True
-    # Someone comes home: the next transition, automation resumes.
-    rig.wifi.home = {A.wifi_mac}
-    rig.run_for(3 * MIN)
-    assert rig.setpoint() == COMFORT
+    # Everyone leaves: the next transition, automation resumes.
+    rig.wifi.home = set()
+    rig.run_for(WINDOW + 5 * MIN)
+    assert rig.setpoint() == AWAY
     assert rig.saved()["climate"]["override"] is False
 
 
@@ -274,8 +287,8 @@ def test_override_survives_a_restart(tmp_path):
     rig.wifi.home = {A.wifi_mac}
     rig.run_for(5 * MIN)
     rig.controller.nodes[1]["attributes"][SETPOINT_PATH] = 2389
-    rig.wifi.home = set()
-    rig.run_for(WINDOW + 5 * MIN)
+    rig.daemon.apply_settings({"comfort_f": 73})
+    rig.run_for(5 * MIN)
     assert rig.saved()["climate"]["override"] is True
 
     rig.daemon = rig.new_daemon()

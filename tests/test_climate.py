@@ -86,26 +86,41 @@ def test_one_command_per_transition():
     assert ctl.decide(thermostat()) is None
 
 
-def test_hand_change_records_override_and_sends_nothing():
+def test_a_transition_takes_over_after_a_hand_changed_setpoint():
     ctl, clock = make()
     ctl.observe(True)
     send(ctl, thermostat(setpoint=AWAY))
     clock.advance(30 * MIN)
-    ctl.observe(False)  # a transition, but the Nest was changed by hand
+    ctl.observe(False)  # a transition: the hand change does not block it
     cmd = ctl.decide(thermostat(setpoint=2500))
-    assert cmd is None
-    assert ctl.state.override is True
-    assert not ctl.due()
+    assert cmd is not None
+    assert (cmd.mode, cmd.setpoint_c100) == (COOL, AWAY)
+    assert ctl.state.override is False
 
 
-def test_hand_changed_mode_is_an_override_too():
+def test_a_transition_takes_over_after_a_hand_changed_mode():
     ctl, clock = make()
     ctl.observe(True)
     send(ctl, thermostat(setpoint=AWAY))
     clock.advance(30 * MIN)
     ctl.observe(False)
-    assert ctl.decide(thermostat(mode=int(matter.SystemMode.OFF))) is None
-    assert ctl.state.override is True
+    cmd = ctl.decide(thermostat(mode=int(matter.SystemMode.OFF)))
+    assert cmd is not None
+    assert (cmd.mode, cmd.setpoint_c100) == (COOL, AWAY)
+    assert ctl.state.override is False
+
+
+def test_leaving_after_a_schedule_moved_the_setpoint_sets_away():
+    ctl, clock = make()
+    ctl.observe(True)
+    send(ctl, thermostat(setpoint=AWAY))
+    clock.advance(30 * MIN)
+    # A schedule moved the Nest one F degree (56 hundredths of a C).
+    ctl.observe(False)
+    cmd = ctl.decide(thermostat(setpoint=COMFORT + 56))
+    assert cmd is not None
+    assert (cmd.mode, cmd.setpoint_c100) == (COOL, AWAY)
+    assert ctl.state.override is False
 
 
 def test_override_held_until_next_transition_then_automation_resumes():
@@ -113,20 +128,23 @@ def test_override_held_until_next_transition_then_automation_resumes():
     ctl.observe(True)
     send(ctl, thermostat(setpoint=AWAY))
     clock.advance(30 * MIN)
-    ctl.observe(False)
-    ctl.decide(thermostat(setpoint=2500))  # override recorded
+    # The Nest is hand-changed, then a settings change owes a new command.
+    ctl.set_setpoints(73, 82)
+    assert ctl.due()
+    assert ctl.decide(thermostat(setpoint=2500)) is None  # override recorded
+    assert ctl.state.override is True
     clock.advance(30 * MIN)
-    ctl.observe(False)  # same state: still held
+    ctl.observe(True)  # same state: still held
     assert not ctl.due()
     clock.advance(30 * MIN)
-    ctl.observe(True)  # the next transition
+    ctl.observe(False)  # the next real transition
     assert ctl.state.override is False
     assert ctl.due()
-    # The thermostat still differs from the last command (the hand change), but
-    # that is already recorded; automation takes over without re-flagging it.
+    # The hand change is already recorded; automation takes over without
+    # re-flagging it.
     cmd = ctl.decide(thermostat(setpoint=2500))
     assert cmd is not None
-    assert cmd.setpoint_c100 == COMFORT
+    assert cmd.setpoint_c100 == AWAY
     assert ctl.state.override is False
 
 
@@ -229,7 +247,7 @@ def test_retry_after_a_partial_write_is_not_mistaken_for_an_override():
     assert ctl.state.override is False
 
 
-def test_a_new_transition_clears_the_half_write_flag_so_a_hand_change_is_seen():
+def test_a_new_transition_after_a_half_write_takes_over():
     ctl, clock = make()
     ctl.observe(True)
     send(ctl, thermostat(setpoint=AWAY))  # last commanded: COOL at comfort
@@ -239,13 +257,12 @@ def test_a_new_transition_clears_the_half_write_flag_so_a_hand_change_is_seen():
     assert cmd is not None
     ctl.begin_command()
     ctl.failed()  # the mode write landed, the setpoint write did not
-    clock.advance(2 * MIN)
-    # Someone hand-changes the Nest while the retry is backing off.
-    clock.advance(1 * MIN)
+    clock.advance(3 * MIN)
     ctl.observe(True)  # occupancy flips: a genuine new transition
-    assert ctl.decide(thermostat(setpoint=2500)) is None
-    assert ctl.state.override is True
-    assert not ctl.due()
+    cmd = ctl.decide(thermostat(setpoint=2500))
+    assert cmd is not None
+    assert (cmd.mode, cmd.setpoint_c100) == (COOL, COMFORT)
+    assert ctl.state.override is False
 
 
 def test_state_round_trips_through_a_dict():
