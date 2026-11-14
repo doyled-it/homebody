@@ -341,7 +341,7 @@ def build(
 
 def _default_link(garage: GarageConfig) -> GarageLink:
     """The ESPHome adapter, imported only here so tests never load it."""
-    from homebody.garage_link import EsphomeLink  # type: ignore[attr-defined]
+    from homebody.garage_link import EsphomeLink
 
     return EsphomeLink(
         garage.host, garage.port, garage.noise_psk, garage.entity_names

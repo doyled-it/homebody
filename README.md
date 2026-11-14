@@ -13,8 +13,12 @@ lives in an untracked local config on the hub, never here.
 ## Status
 
 Early. The Matter controller client, presence, the decision loop, the status
-file, and the local settings API are in. The room-picker Climate screen comes in
-a later task.
+file, and the local settings API are in, and so is the garage door module (off
+unless `[garage]` is in the local config). It watches and, with guards, commands
+a Konnected blaQ board over the ESPHome native API, which production always
+encrypts with an API key. Install-day bring-up for the garage lives in the garage
+design spec (`docs/superpowers/specs/2026-11-14-garage-design.md`). The
+room-picker Climate screen comes in a later task.
 
 ## How it fits together
 
