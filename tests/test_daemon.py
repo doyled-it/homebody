@@ -11,10 +11,13 @@ import asyncio
 import json
 from pathlib import Path
 
+import pytest
+
 from fakes import FakeConnectionContext, FakeController
 from homebody import matter
 from homebody.config import Config, Person
 from homebody.daemon import STATE_FILE, Daemon
+from homebody.people import PeopleError
 from homebody.presence import PresenceTracker
 
 MIN = 60.0
@@ -313,3 +316,99 @@ def test_no_thermostat_commissioned_is_a_retry_not_a_crash(tmp_path):
     rig.controller.add_thermostat(cooling_c100=AWAY)
     rig.run_for(20 * MIN)
     assert rig.setpoint() == COMFORT
+
+
+# Added people (the "count this phone as home" feature).
+SAM_MAC = "02:00:00:00:00:0a"
+
+
+def test_add_person_counts_and_saves(tmp_path):
+    rig = Rig(tmp_path)
+    doc = rig.daemon.add_person(" Sam ", SAM_MAC.upper())
+    added = [p for p in doc["people"] if p["removable"]]
+    assert [p["name"] for p in added] == ["Sam"]
+    assert rig.daemon.counted_as(SAM_MAC) == "Sam"
+    assert rig.saved()["people"] == [
+        {"id": added[0]["id"], "name": "Sam", "wifi_mac": SAM_MAC}
+    ]
+
+
+def test_add_person_twice_is_409(tmp_path):
+    rig = Rig(tmp_path)
+    rig.daemon.add_person("Sam", SAM_MAC)
+    with pytest.raises(PeopleError) as e:
+        rig.daemon.add_person("Other", SAM_MAC)
+    assert e.value.status == 409
+    assert str(e.value) == "This phone is already counted as Sam."
+
+
+def test_ninth_added_person_is_400(tmp_path):
+    rig = Rig(tmp_path)
+    for i in range(8):
+        rig.daemon.add_person(f"Guest {i}", f"02:00:00:00:01:{i:02x}")
+    with pytest.raises(PeopleError) as e:
+        rig.daemon.add_person("Guest 9", "02:00:00:00:01:ff")
+    assert e.value.status == 400
+    assert str(e.value) == "Up to 8 people can be added here."
+
+
+def test_remove_configured_person_is_400(tmp_path):
+    rig = Rig(tmp_path)
+    with pytest.raises(PeopleError) as e:
+        rig.daemon.remove_person("person-a")
+    assert e.value.status == 400
+    assert str(e.value) == "That person cannot be removed here."
+    with pytest.raises(PeopleError):
+        rig.daemon.remove_person(5)
+
+
+def test_added_people_survive_restart(tmp_path):
+    rig = Rig(tmp_path)
+    rig.daemon.add_person("Sam", SAM_MAC)
+    doc = rig.daemon.add_person("Jo", "02:00:00:00:00:0b")
+    sam = next(p for p in doc["people"] if p["name"] == "Sam")
+    rig.daemon.remove_person(sam["id"])
+    rig.daemon = rig.new_daemon()
+    people = rig.daemon.status_document()["people"]
+    names = [p["name"] for p in people if p["removable"]]
+    assert names == ["Jo"]
+
+
+def test_saved_people_duplicating_a_configured_phone_or_an_id_are_not_tracked_twice(
+    tmp_path,
+):
+    rig = Rig(tmp_path)
+    state = {
+        "people": [
+            {"id": "added-00000001", "name": "Dup", "wifi_mac": A.wifi_mac},
+            {"id": "added-00000002", "name": "Sam", "wifi_mac": SAM_MAC},
+            {"id": "added-00000002", "name": "Jo", "wifi_mac": "02:00:00:00:00:0b"},
+        ]
+    }
+    (tmp_path / STATE_FILE).write_text(json.dumps(state))
+    rig.daemon = rig.new_daemon()
+    people = rig.daemon.status_document()["people"]
+    added = [p for p in people if p["removable"]]
+    assert [p["name"] for p in added] == ["Sam"]
+    assert [p["id"] for p in people] == ["person-a", "added-00000002"]
+    assert rig.daemon.counted_as(A.wifi_mac) == "Person A"
+
+
+def test_add_person_survives_a_failed_state_save(tmp_path, monkeypatch):
+    rig = Rig(tmp_path)
+
+    def broken(data):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(rig.daemon._store, "save", broken)
+    doc = rig.daemon.add_person("Sam", SAM_MAC)
+    assert [p["name"] for p in doc["people"] if p["removable"]] == ["Sam"]
+    assert rig.daemon.counted_as(SAM_MAC) == "Sam"
+
+
+def test_add_person_with_an_invalid_address_is_400(tmp_path):
+    rig = Rig(tmp_path)
+    with pytest.raises(PeopleError) as e:
+        rig.daemon.add_person("Sam", "not-a-mac")
+    assert e.value.status == 400
+    assert rig.daemon.counted_as("not-a-mac") is None

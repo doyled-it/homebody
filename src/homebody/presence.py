@@ -15,6 +15,7 @@ real ones; they never raise, a failed probe just means "not seen".
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import subprocess
 from collections.abc import Callable, Sequence
@@ -52,11 +53,15 @@ class PersonStatus:
     state: str
     signal: str | None
     seconds_since_seen: float | None
+    removable: bool = False
 
 
 class _Tracked:
-    def __init__(self, person: Person, started: float) -> None:
+    def __init__(
+        self, person: Person, started: float, removable: bool = False
+    ) -> None:
         self.person = person
+        self.removable = removable
         self.last_seen: float | None = None
         self.last_wifi_seen: float | None = None
         self.last_signal: str | None = None
@@ -123,6 +128,30 @@ class PresenceTracker:
                 return True
         return False
 
+    def add_person(self, person: Person) -> None:
+        """Track a person added at runtime, observed afresh and removable."""
+        self._tracked.append(_Tracked(person, self._clock(), removable=True))
+
+    def remove_person(self, person_id: str) -> bool:
+        """Stop tracking an added person. False for unknown or configured ids."""
+        for t in self._tracked:
+            if t.person.id == person_id and t.removable:
+                self._tracked.remove(t)
+                return True
+        return False
+
+    def all_people(self) -> list[Person]:
+        """Everyone tracked, enabled or not."""
+        return [t.person for t in self._tracked]
+
+    def person_for_mac(self, mac: str) -> Person | None:
+        """Whoever is tracked with this Wi-Fi address, enabled or not."""
+        wanted = mac.lower()
+        for t in self._tracked:
+            if t.person.wifi_mac and t.person.wifi_mac.lower() == wanted:
+                return t.person
+        return None
+
     def set_away_window(self, seconds: float) -> None:
         """Change how long someone stays home after the last sighting."""
         self._window = seconds
@@ -174,6 +203,7 @@ class PresenceTracker:
                 seconds_since_seen=(
                     now - t.last_seen if t.last_seen is not None else None
                 ),
+                removable=t.removable,
             )
             for t in self._active()
         ]
@@ -235,6 +265,32 @@ class NeighbourWifiProbe:
         except (OSError, subprocess.SubprocessError):
             log.warning("wifi probe could not run")
             return False
+
+
+def neighbour_mac(ip: str, runner: Runner = run_command) -> str | None:
+    """The hardware address the kernel has for an IPv4 address, lower-case.
+
+    ``None`` unless ``ip`` is a valid IPv4 address with a usable neighbour entry
+    (not FAILED or INCOMPLETE), or when the lookup cannot run.
+    """
+    try:
+        ipaddress.IPv4Address(ip)
+    except ValueError:
+        return None
+    try:
+        rc, out = runner(["ip", "-4", "neigh", "show", ip], 5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if rc != 0:
+        return None
+    for line in out.splitlines():
+        parts = line.split()
+        if "lladdr" not in parts or parts[-1] in NeighbourWifiProbe._BAD:
+            continue
+        index = parts.index("lladdr") + 1
+        if index < len(parts):
+            return parts[index].lower()
+    return None
 
 
 class L2pingBluetoothProbe:

@@ -51,6 +51,7 @@ def build_document(
         "occupied": occupied,
         "people": [
             {
+                "id": p.id,
                 "name": p.name,
                 "state": p.state,
                 "last_seen": (
@@ -59,6 +60,7 @@ def build_document(
                     else iso(now - p.seconds_since_seen)
                 ),
                 "via": p.signal,
+                "removable": p.removable,
             }
             for p in people
         ],

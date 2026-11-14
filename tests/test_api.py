@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from homebody import api, status
+from homebody.people import PeopleError
 from test_daemon import AWAY, COMFORT, MIN, SETPOINT_PATH, WINDOW, A, Rig
 
 GUARD = {"x-snaphouse": "1"}
@@ -263,3 +264,147 @@ def test_http_server_end_to_end(tmp_path: Path):
     assert junk[0] == 400
     assert big[0] == 413
     assert rig.saved()["settings"] == {"comfort_f": 71}
+
+
+# People endpoints ("count this phone as home")
+DEVICE = "/api/homebody/people/this-device"
+ADD = "/api/homebody/people/add"
+REMOVE = "/api/homebody/people/remove"
+PHONE = "02:00:00:00:00:0a"
+LAN = {"x-real-ip": "192.0.2.5"}
+
+
+class StubPeople(StubSettings):
+    def __init__(self, counted=None):
+        super().__init__()
+        self.counted = counted
+        self.added: list[tuple] = []
+        self.removed: list[object] = []
+
+    def counted_as(self, mac):
+        return self.counted
+
+    def add_person(self, name, mac):
+        self.added.append((name, mac))
+        if self.counted:
+            raise PeopleError(f"This phone is already counted as {self.counted}.", 409)
+        return {"version": 1, "people": [name]}
+
+    def remove_person(self, person_id):
+        self.removed.append(person_id)
+        if person_id == "nope":
+            raise PeopleError("That person cannot be removed here.")
+        return {"version": 1, "people": []}
+
+
+def lookup_for(table):
+    return lambda ip: table.get(ip)
+
+
+def people_call(method, path, headers=None, body=None, stub=None, table=None):
+    stub = stub or StubPeople()
+    table = {"192.0.2.5": PHONE} if table is None else table
+    raw = b"" if body is None else json.dumps(body).encode()
+    code, doc = api.handle(
+        stub, method, path, {**GUARD, **(headers or {})}, raw, lookup_for(table)
+    )
+    return code, doc, stub
+
+
+def test_tunnel_request_cannot_add():
+    headers = {**LAN, "cf-connecting-ip": "203.0.113.9"}
+    code, doc, stub = people_call("POST", ADD, headers, {"name": "Sam"})
+    assert code == 403 and doc["reason"] == "remote"
+    assert doc["error"] == "Count a phone from the home Wi-Fi, not from away."
+    assert stub.added == []
+
+
+def device(can_add, counted_as, reason):
+    return 200, {"can_add": can_add, "counted_as": counted_as, "reason": reason}
+
+
+def test_this_device_reports_remote_unknown_counted_and_addable():
+    tunnel = {**LAN, "cf-connecting-ip": "203.0.113.9"}
+    assert people_call("GET", DEVICE, tunnel)[:2] == (device(False, None, "remote"))
+    assert people_call("GET", DEVICE, {}, table={})[:2] == device(
+        False, None, "unknown"
+    )
+    counted = people_call("GET", DEVICE, LAN, stub=StubPeople(counted="Alex"))
+    assert counted[:2] == device(False, "Alex", None)
+    assert people_call("GET", DEVICE, LAN)[:2] == device(True, None, None)
+
+
+def test_this_device_needs_no_guard_header():
+    stub = StubPeople()
+    table = lookup_for({"192.0.2.5": PHONE})
+    code, _ = api.handle(stub, "GET", DEVICE, LAN, b"", table)
+    assert code == 200
+
+
+def test_add_unknown_device_is_403_unknown():
+    code, doc, stub = people_call("POST", ADD, {}, {"name": "Sam"}, table={})
+    assert code == 403 and doc["reason"] == "unknown"
+    assert doc["error"] == "The hub could not tell which device this is."
+    assert stub.added == []
+
+
+def test_add_from_lan_returns_the_status_document():
+    code, doc, stub = people_call("POST", ADD, LAN, {"name": "Sam"})
+    assert code == 200 and doc["people"] == ["Sam"]
+    assert stub.added == [("Sam", PHONE)]
+
+
+def test_add_from_counted_device_is_409():
+    stub = StubPeople("Alex")
+    code, doc, _ = people_call("POST", ADD, LAN, {"name": "Sam"}, stub=stub)
+    assert code == 409
+    assert doc == {"error": "This phone is already counted as Alex."}
+
+
+def test_add_needs_guard_header():
+    stub = StubPeople()
+    raw = json.dumps({"name": "Sam"}).encode()
+    code, _ = api.handle(stub, "POST", ADD, LAN, raw, lookup_for({"192.0.2.5": PHONE}))
+    assert code == 403 and stub.added == []
+
+
+def test_remove_through_tunnel_is_allowed():
+    headers = {**LAN, "cf-connecting-ip": "203.0.113.9"}
+    code, _, stub = people_call("POST", REMOVE, headers, {"id": "added-00000001"})
+    assert code == 200 and stub.removed == ["added-00000001"]
+    code, doc, _ = people_call("POST", REMOVE, headers, {"id": "nope"})
+    assert code == 400 and doc == {"error": "That person cannot be removed here."}
+
+
+def test_remove_needs_guard_header():
+    stub = StubPeople()
+    code, _ = api.handle(stub, "POST", REMOVE, {}, b'{"id": "x"}', lookup_for({}))
+    assert code == 403 and stub.removed == []
+
+
+def test_people_paths_reject_wrong_method():
+    for method in ("POST", "PUT", "DELETE"):
+        assert people_call(method, DEVICE, LAN)[0] == 405
+    for path in (ADD, REMOVE):
+        for method in ("GET", "PUT", "DELETE"):
+            assert people_call(method, path, LAN, {})[0] == 405
+
+
+def test_add_rejects_unknown_keys_and_bad_bodies():
+    code, doc, stub = people_call("POST", ADD, LAN, {"name": "Sam", "wifi_mac": PHONE})
+    assert code == 400 and "error" in doc and stub.added == []
+    assert people_call("POST", ADD, LAN, ["Sam"])[0] == 400
+    code, _, stub = people_call("POST", REMOVE, LAN, {"id": "x", "extra": 1})
+    assert code == 400 and stub.removed == []
+    table = lookup_for({"192.0.2.5": PHONE})
+    code, _ = api.handle(StubPeople(), "POST", ADD, {**GUARD, **LAN}, b"{", table)
+    assert code == 400
+
+
+def test_resolve_device_order():
+    table = lookup_for({"192.0.2.5": PHONE})
+    both = {"cf-connecting-ip": "203.0.113.9", "x-real-ip": "192.0.2.5"}
+    assert api.resolve_device(both, table) == (None, "remote")
+    assert api.resolve_device({}, table) == (None, "unknown")
+    assert api.resolve_device({"x-real-ip": "192.0.2.6"}, table) == (None, "unknown")
+    assert api.resolve_device({"x-real-ip": "192.0.2.5"}, table) == (PHONE, None)

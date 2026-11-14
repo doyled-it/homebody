@@ -21,7 +21,7 @@ from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from typing import Any
 
-from homebody import __version__, api, config, daemon, matter
+from homebody import __version__, api, config, daemon, matter, presence
 
 # A connect factory turns a controller URL into an async context manager that
 # yields a MatterConnection. The default opens a real WebSocket; tests inject a
@@ -112,7 +112,7 @@ async def _start_api(
     """Start the settings API on loopback. Presence control matters more than
     the API, so a port that cannot be bound is logged and the loop runs anyway."""
     try:
-        return await api.start(service, "127.0.0.1", port)
+        return await api.start(service, "127.0.0.1", port, presence.neighbour_mac)
     except OSError:
         logging.getLogger(__name__).exception(
             "settings API could not listen on port %d", port

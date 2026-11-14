@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import stat
 
 from homebody import status
@@ -62,11 +63,17 @@ def test_people_carry_state_last_seen_and_signal():
         ],
     )
     assert d["people"] == [
-        {"name": "Person A", "state": "home", "last_seen": "2027-01-15T07:59:52Z",
-         "via": "wifi"},
-        {"name": "Person B", "state": "unknown", "last_seen": None, "via": None},
+        {"id": "a", "name": "Person A", "state": "home",
+         "last_seen": "2027-01-15T07:59:52Z", "via": "wifi", "removable": False},
+        {"id": "b", "name": "Person B", "state": "unknown", "last_seen": None,
+         "via": None, "removable": False},
     ]
-    assert "id" not in d["people"][0]
+
+
+def test_status_document_has_no_addresses():
+    d = doc(people=[PersonStatus("added-0000000a", "Sam", "home", "wifi", 8.0, True)])
+    assert d["people"][0]["removable"] is True
+    assert not re.search(r"[0-9a-f]{2}(:[0-9a-f]{2}){5}", json.dumps(d))
 
 
 def test_thermostat_and_last_change_shape():

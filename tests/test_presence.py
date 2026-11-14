@@ -468,3 +468,66 @@ def test_l2ping_failure_and_missing_tool_are_not_seen():
 def test_subprocess_runner_runs_a_real_command():
     rc, out = presence.run_command(["echo", "hi"], timeout=5)
     assert (rc, out.strip()) == (0, "hi")
+
+
+def test_added_person_is_tracked_and_removable():
+    clock, wifi = Clock(), FakeWifi()
+    tracker = presence.PresenceTracker(
+        [Person("Alex", True, "02:00:00:00:00:01", None, "person-1")],
+        wifi=wifi, bluetooth=FakeBluetooth(), clock=clock,
+    )
+    tracker.add_person(Person("Sam", True, "02:00:00:00:00:0a", None, "added-0000000a"))
+    by_id = {s.id: s for s in tracker.statuses()}
+    assert by_id["added-0000000a"].removable is True
+    assert by_id["added-0000000a"].state == presence.UNKNOWN
+    assert by_id["person-1"].removable is False
+    wifi.visible.add("02:00:00:00:00:0a")
+    tracker.poll()
+    states = {s.id: s.state for s in tracker.statuses()}
+    assert states["added-0000000a"] == presence.HOME
+    assert tracker.remove_person("added-0000000a") is True
+    assert [s.id for s in tracker.statuses()] == ["person-1"]
+
+
+def test_configured_person_cannot_be_removed():
+    tracker = presence.PresenceTracker(
+        [Person("Alex", True, "02:00:00:00:00:01", None, "person-1")],
+        wifi=FakeWifi(), bluetooth=FakeBluetooth(), clock=Clock(),
+    )
+    assert tracker.remove_person("person-1") is False
+    assert tracker.remove_person("nobody") is False
+    assert len(tracker.statuses()) == 1
+
+
+def test_counted_as_finds_config_people_ignoring_case():
+    alex = Person("Alex", False, "02:00:00:00:00:0a", None, "person-1")
+    tracker = presence.PresenceTracker(
+        [alex], wifi=FakeWifi(), bluetooth=FakeBluetooth(), clock=Clock(),
+    )
+    assert tracker.person_for_mac("02:00:00:00:00:0A") == alex
+    assert tracker.person_for_mac("02:00:00:00:00:0b") is None
+
+
+def test_neighbour_mac_reads_lladdr():
+    runner = Runner(
+        {"ip": (0, "192.0.2.5 dev eth0 lladdr 02:00:00:00:00:0A STALE\n")}
+    )
+    assert presence.neighbour_mac("192.0.2.5", runner) == "02:00:00:00:00:0a"
+    assert runner.cmds == [["ip", "-4", "neigh", "show", "192.0.2.5"]]
+
+
+def test_neighbour_mac_rejects_failed_and_non_ipv4():
+    failed = Runner({"ip": (0, "192.0.2.5 dev eth0  FAILED\n")})
+    assert presence.neighbour_mac("192.0.2.5", failed) is None
+    line = "192.0.2.5 dev eth0 lladdr 02:00:00:00:00:0a INCOMPLETE\n"
+    incomplete = Runner({"ip": (0, line)})
+    assert presence.neighbour_mac("192.0.2.5", incomplete) is None
+    untouched = Runner({})
+    for bad in ("fe80::1", "not-an-ip", "", "192.0.2.5; ls"):
+        assert presence.neighbour_mac(bad, untouched) is None
+    assert untouched.cmds == []
+
+
+def test_neighbour_mac_is_none_on_errors():
+    assert presence.neighbour_mac("192.0.2.5", Runner({"ip": OSError("x")})) is None
+    assert presence.neighbour_mac("192.0.2.5", Runner({"ip": (1, "")})) is None
