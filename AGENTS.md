@@ -41,6 +41,13 @@ src/homebody/
   status.py     the homebody.json document and its atomic writer
   api.py        the settings HTTP service (asyncio, stdlib only)
   cli.py        the console entry point (homebody matter ..., homebody run)
+  garage.py          the door model: states, open episodes, garage.json store
+  garage_link.py     the board link types and the GarageLink Protocol
+  garage_alerts.py   pure alert rules (left open, opened away, offline, ...)
+  garage_commands.py the command gate: nonce, origin rules, pacing, confirm
+  garage_service.py  the supervised garage task and its build() from config
+  notify.py          the ntfy client (one POST per alert, bounded retries)
+  audit.py           garage-audit.log: JSON lines, rotated, actor tags only
 deploy/
   install.sh    root installer: user, config, dirs, uv venv, verify, last-good
   update.sh     self-update from main with a verify step and last-good fallback
@@ -175,6 +182,67 @@ tracked by Wi-Fi only, and adds and removes are logged by id, never address or
 name. The `X-Real-IP` and `CF-Connecting-IP` headers must be passed by the hub's
 nginx (a snaphouse change).
 
+## Garage
+
+The garage door module watches and (from the house or, if switched on, the
+tunnel) commands a Konnected blaQ board running ESPHome. It is off unless
+`[garage]` is in `local.toml`; a bad `[garage]` turns only the garage off and
+logs why (the field, never the value), and homebody starts as it always did.
+
+Isolation rule: a garage failure must never stop climate. The service
+(`garage_service.GarageService`) is its own asyncio task, started next to the
+daemon in `cli._serve_async`. It never runs inside `Daemon.tick`, takes no lock
+shared with climate, imports no climate module, and writes only `garage.json`
+and `garage-audit.log` (never `homebody.json`; the daemon is the single
+writer). Its supervisor (`run`) catches every exception, logs the exception
+type only, and restarts the loop with a backoff of 5 s doubling to 5 min. ntfy
+sends run in a worker thread, off the loop's path.
+
+The three meeting points with the daemon, all non-blocking:
+
+1. The service reads `Daemon.occupied()` and `Daemon.garage_settings()`.
+2. `Daemon.publish()` includes `garage.snapshot()` as the `garage` key
+   (`Daemon.attach_garage`), `null` if it raises. When the door or link changes
+   the service calls `Daemon.request_publish()`, which wakes `Daemon.run` to
+   publish only (no tick).
+3. The API handler calls the command gate (`api.start(garage=service)`), under
+   its own cap, `GarageService.timeout_seconds` (close wait plus note wait plus
+   headroom).
+
+Files in `[daemon] state_dir`: `garage.json` (the door's last known state, since,
+last seen, and the open episode with the alert kinds already sent, so a restart
+does not resend; written atomically, a failed write is logged and ignored) and
+`garage-audit.log` (JSON lines, 256 KB rotation with 2 old files, a `kind` of
+`door` or `command`). The audit log holds only an origin and a four character
+HMAC tag of the caller, never an email or an address. The status `recent` list
+is the last 10 `door` entries.
+
+Origin: the hub's nginx sets `X-Snaphouse-Origin: home` for LAN requests;
+anything else (missing or forged) is treated as the tunnel. A tunnel request
+also needs the `Cf-Access-Authenticated-User-Email` header. Decision on the
+Access signature: v1 checks that header and relies on the install-day Access
+test; it does not verify the `Cf-Access-Jwt-Assertion` signature (that needs the
+team's public keys and an outbound fetch). This is a recorded, accepted gap.
+
+Link security: the board link must be encrypted. `[garage] noise_psk` is the
+ESPHome API key; without it the config is refused unless `allow_plaintext =
+true`, which logs a warning at every start.
+
+Endpoints (POST, loopback, `X-Snaphouse: 1`): `/api/homebody/garage/intent`
+(`{"action"}` returns `{nonce, expires_in, confirm_required}`) and
+`/api/homebody/garage/command` (`{"action", "nonce"}` returns the full status
+document). Settings through `/api/homebody/settings`: `garage_left_open_minutes`,
+`garage_away_open_grace_minutes`, `garage_alerts` and `garage_remote` (default
+off, and it can only be turned on from the house).
+
+No-retry and no-auto-close rules: nothing moves a door without a person. A
+command asks for an end state (never a toggle), is never retried, and there is
+no automatic close. A command needs a fresh single-use nonce (30 s), the
+tunnel is limited to 1 command per 10 s and 6 per hour, intents are capped at 10 per
+minute per caller, and a remote command sends an ntfy note first. ntfy buttons are `view` links only. The state is
+`unknown` whenever the link is down or no state has arrived since connect;
+`closed` is never shown without a live link.
+
 ## The Python pin
 
 `.python-version` pins uv to 3.12. Without it, uv on a host whose system Python is
@@ -202,7 +270,8 @@ paths.
 ## Config and identifying data
 
 The only identifying data on the hub (phone hardware addresses, the Nest's node
-id, display names) lives in the untracked `/etc/homebody/local.toml`, seeded from
+id, display names, the garage board's host and ESPHome key, the ntfy address,
+topic and token, and the house page address) lives in the untracked `/etc/homebody/local.toml`, seeded from
 `local.example.toml`. Never put a name, email, address, home location, MAC, IP,
 or pairing code in this repo, in a commit message, in a test, or in any web
 request or search query. The example file uses generic placeholders only.

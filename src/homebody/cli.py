@@ -21,11 +21,22 @@ from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from typing import Any
 
-from homebody import __version__, api, config, daemon, matter, presence
+from homebody import (
+    __version__,
+    api,
+    config,
+    daemon,
+    garage_service,
+    matter,
+    presence,
+)
 
 # A connect factory turns a controller URL into an async context manager that
 # yields a MatterConnection. The default opens a real WebSocket; tests inject a
 # factory that yields an in-memory fake controller.
+# How long the garage task gets to finish after stop before it is cancelled.
+GARAGE_STOP_SECONDS = 5.0
+
 ConnectFactory = Callable[[str], AbstractAsyncContextManager[Any]]
 
 
@@ -88,31 +99,70 @@ def _serve(settings: config.Config) -> None:
         level=logging.INFO, format="%(levelname)s %(name)s: %(message)s"
     )
 
-    async def main_loop() -> None:
-        stop = asyncio.Event()
-        loop = asyncio.get_running_loop()
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            loop.add_signal_handler(sig, stop.set)
-        override = os.environ.get("HOMEBODY_MATTER_URL")
-        service = daemon.build(settings, url=override)
-        server = await _start_api(service, settings.api_port)
-        try:
-            await service.run(stop)
-        finally:
-            if server is not None:
-                server.close()
-                await server.wait_closed()
+    asyncio.run(_run_with_signals(settings))
 
-    asyncio.run(main_loop())
+
+async def _run_with_signals(settings: config.Config) -> None:
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, stop.set)
+    await _serve_async(settings, stop)
+
+
+async def _serve_async(
+    settings: config.Config,
+    stop: asyncio.Event,
+    *,
+    build_daemon: Callable[..., daemon.Daemon] = daemon.build,
+    link_factory: Callable[[Any], Any] | None = None,
+    on_started: Callable[[asyncio.Server | None, daemon.Daemon], None] | None = None,
+) -> None:
+    """Run the daemon, the settings API and (when configured) the garage until
+    ``stop``. The garage is its own task, so nothing in it can hold up a tick."""
+    override = os.environ.get("HOMEBODY_MATTER_URL")
+    service = build_daemon(settings, url=override)
+    garage = garage_service.build(settings, service, link_factory=link_factory)
+    if garage is not None:
+        service.attach_garage(garage.snapshot)
+    server = await _start_api(service, settings.api_port, garage)
+    garage_task = (
+        asyncio.create_task(garage.run(stop)) if garage is not None else None
+    )
+    if on_started is not None:
+        on_started(server, service)
+    try:
+        await service.run(stop)
+    finally:
+        stop.set()
+        if garage_task is not None:
+            await _stop_garage(garage_task)
+        if server is not None:
+            server.close()
+            await server.wait_closed()
+
+
+async def _stop_garage(task: asyncio.Task[None]) -> None:
+    """Let the garage task finish after ``stop``; cancel it if it does not."""
+    try:
+        await asyncio.wait_for(task, GARAGE_STOP_SECONDS)
+    except asyncio.CancelledError:
+        raise
+    except BaseException:
+        logging.getLogger(__name__).warning("garage task did not stop cleanly")
 
 
 async def _start_api(
-    service: daemon.Daemon, port: int
+    service: daemon.Daemon,
+    port: int,
+    garage: garage_service.GarageService | None = None,
 ) -> asyncio.Server | None:
     """Start the settings API on loopback. Presence control matters more than
     the API, so a port that cannot be bound is logged and the loop runs anyway."""
     try:
-        return await api.start(service, "127.0.0.1", port, presence.neighbour_mac)
+        return await api.start(
+            service, "127.0.0.1", port, presence.neighbour_mac, garage=garage
+        )
     except OSError:
         logging.getLogger(__name__).exception(
             "settings API could not listen on port %d", port

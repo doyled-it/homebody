@@ -29,7 +29,14 @@ from typing import Any
 
 from homebody import matter, status
 from homebody.climate import ClimateController, ClimateState
-from homebody.config import Config, Person
+from homebody.config import (
+    GARAGE_GRACE_RANGE,
+    GARAGE_LEFT_OPEN_RANGE,
+    Config,
+    GarageConfig,
+    Person,
+)
+from homebody.garage import GarageSettings
 from homebody.people import (
     MAX_ADDED,
     PeopleError,
@@ -52,6 +59,18 @@ TICK_SECONDS = 15.0
 # How often the thermostat is read just to keep the status file fresh.
 STATUS_READ_SECONDS = 60.0
 SETTING_KEYS = ("enabled", "comfort_f", "away_f", "away_minutes")
+# Saved beside the climate keys in state.json, but kept out of the document's
+# climate "settings" object (the garage key carries them).
+GARAGE_SETTING_KEYS = (
+    "garage_left_open_minutes",
+    "garage_away_open_grace_minutes",
+    "garage_alerts",
+    "garage_remote",
+)
+_GARAGE_INT_RANGES = {
+    "garage_left_open_minutes": GARAGE_LEFT_OPEN_RANGE,
+    "garage_away_open_grace_minutes": GARAGE_GRACE_RANGE,
+}
 # One whole thermostat exchange (connect, read, write) may not hang the loop.
 EXCHANGE_TIMEOUT_SECONDS = 30.0
 
@@ -144,21 +163,56 @@ class Daemon:
         self._reachable: bool | None = None
         self._reading: matter.ThermostatState | None = None
         self._next_status_read = 0.0
+        self._garage_source: Callable[[], dict[str, Any] | None] | None = None
+        self._publish_requested = asyncio.Event()
+
+    def request_publish(self) -> None:
+        """Ask ``run`` to publish early (the garage calls this when the door
+        changes). It only sets an event; no tick runs."""
+        self._publish_requested.set()
+
+    def attach_garage(self, source: Callable[[], dict[str, Any] | None]) -> None:
+        """Give the document its ``garage`` value; ``source`` may raise."""
+        self._garage_source = source
+
+    def _garage_document(self) -> dict[str, Any] | None:
+        if self._garage_source is None:
+            return None
+        try:
+            return self._garage_source()
+        except Exception as error:
+            log.warning("garage status failed (%s)", type(error).__name__)
+            return None
+
+    def garage_settings(self) -> GarageSettings:
+        s = self.settings()
+        return GarageSettings(
+            left_open_minutes=s["garage_left_open_minutes"],
+            away_open_grace_minutes=s["garage_away_open_grace_minutes"],
+            alerts=s["garage_alerts"],
+            remote=s["garage_remote"],
+        )
 
     def settings(self) -> dict[str, Any]:
         """The effective settings: local.toml defaults under the saved overrides."""
+        garage = self._config.garage or GarageConfig(host="")
         merged: dict[str, Any] = {
             "enabled": True,
             "comfort_f": self._config.comfort_f,
             "away_f": self._config.away_f,
             "away_minutes": self._config.away_minutes,
+            "garage_left_open_minutes": garage.left_open_minutes,
+            "garage_away_open_grace_minutes": garage.away_open_grace_minutes,
+            "garage_alerts": True,
+            "garage_remote": False,
         }
         merged.update(self._overrides)
         return merged
 
     def apply_settings(self, changes: dict[str, Any]) -> dict[str, Any]:
         """Apply validated settings, persist them, and return the status document."""
-        self._overrides.update({k: v for k, v in changes.items() if k in SETTING_KEYS})
+        known = SETTING_KEYS + GARAGE_SETTING_KEYS
+        self._overrides.update({k: v for k, v in changes.items() if k in known})
         current = self.settings()
         self._presence.set_away_window(current["away_minutes"] * 60.0)
         self.climate.set_setpoints(current["comfort_f"], current["away_f"])
@@ -201,6 +255,7 @@ class Daemon:
             override=s.override,
             last_change=last_change,
             settings={k: settings[k] for k in SETTING_KEYS[1:]},
+            garage=self._garage_document(),
         )
 
     def publish(self) -> dict[str, Any]:
@@ -284,18 +339,45 @@ class Daemon:
             log.exception("could not publish status")
 
     async def run(self, stop: asyncio.Event | None = None) -> None:
-        """Tick until ``stop`` is set, then release the controller."""
+        """Tick until ``stop`` is set, then release the controller.
+
+        Between ticks the loop also wakes on ``request_publish`` and publishes
+        the status document (only that; the tick itself is not run early).
+        """
         stop = stop or asyncio.Event()
         log.info("homebody running")
         try:
             while not stop.is_set():
                 await self.tick()
-                try:
-                    await asyncio.wait_for(stop.wait(), TICK_SECONDS)
-                except TimeoutError:
-                    pass
+                await self._wait_for_next_tick(stop)
         finally:
             await self._disconnect()
+
+    async def _wait_for_next_tick(self, stop: asyncio.Event) -> None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + TICK_SECONDS
+        while not stop.is_set():
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return
+            waiters = {
+                asyncio.ensure_future(stop.wait()),
+                asyncio.ensure_future(self._publish_requested.wait()),
+            }
+            try:
+                await asyncio.wait(
+                    waiters, timeout=remaining, return_when=asyncio.FIRST_COMPLETED
+                )
+            finally:
+                for waiter in waiters:
+                    waiter.cancel()
+                await asyncio.gather(*waiters, return_exceptions=True)
+            if self._publish_requested.is_set():
+                self._publish_requested.clear()
+                try:
+                    self.publish()
+                except Exception:
+                    log.exception("could not publish status")
 
     async def _refresh_thermostat(self) -> None:
         """Read the thermostat for the status file only; never commands anything."""
@@ -399,6 +481,18 @@ def _clean_settings(raw: Any) -> dict[str, Any]:
             if isinstance(value, bool):
                 clean[key] = value
         elif isinstance(value, int) and not isinstance(value, bool):
+            clean[key] = value
+    for key in GARAGE_SETTING_KEYS:
+        value = raw.get(key)
+        if key in _GARAGE_INT_RANGES:
+            low, high = _GARAGE_INT_RANGES[key]
+            if (
+                isinstance(value, int)
+                and not isinstance(value, bool)
+                and low <= value <= high
+            ):
+                clean[key] = value
+        elif isinstance(value, bool):
             clean[key] = value
     return clean
 

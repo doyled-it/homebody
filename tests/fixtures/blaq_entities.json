@@ -1,0 +1,14 @@
+{
+  "source": "konnected-io/konnected-esphome, garage-door-GDOv2-Q.yaml (project_version 1.7.0) with packages/secplus-gdo.yaml; entity names verified 2026-11-14; stock config has a bare api: block (no encryption key)",
+  "entities": [
+    {"type": "cover", "name": "Garage Door"},
+    {"type": "light", "name": "Garage Light"},
+    {"type": "lock", "name": "Lock"},
+    {"type": "binary_sensor", "name": "Motion"},
+    {"type": "binary_sensor", "name": "Obstruction", "device_class": "problem"},
+    {"type": "binary_sensor", "name": "Motor"},
+    {"type": "binary_sensor", "name": "Wall Button"},
+    {"type": "binary_sensor", "name": "Synced"},
+    {"type": "sensor", "name": "Garage Openings"}
+  ]
+}

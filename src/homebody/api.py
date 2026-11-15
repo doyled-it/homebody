@@ -23,9 +23,11 @@ import asyncio
 import json
 import logging
 from collections.abc import Callable, Mapping
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from homebody import presence
+from homebody.config import GARAGE_GRACE_RANGE, GARAGE_LEFT_OPEN_RANGE
+from homebody.garage_commands import CommandError, CommandGate
 from homebody.people import PeopleError
 
 log = logging.getLogger(__name__)
@@ -39,10 +41,19 @@ PEOPLE_PATHS = {
     PEOPLE_ADD: "POST",
     PEOPLE_REMOVE: "POST",
 }
+GARAGE_INTENT = "/api/homebody/garage/intent"
+GARAGE_COMMAND = "/api/homebody/garage/command"
+GARAGE_PATHS = (GARAGE_INTENT, GARAGE_COMMAND)
 GUARD_HEADER = "x-snaphouse"
+ORIGIN_HEADER = "x-snaphouse-origin"
+ACCESS_EMAIL_HEADER = "cf-access-authenticated-user-email"
+MAX_ACTION = 16
+MAX_NONCE = 128
 MAX_BODY = 64 * 1024
 MAX_HEADER_BYTES = 16 * 1024
 READ_TIMEOUT_SECONDS = 10.0
+# A garage request waits on the door, so it runs under its own cap: the
+# target's ``timeout_seconds`` (the config waits plus headroom).
 
 # key: (minimum, maximum, plain name for messages)
 RANGES = {
@@ -50,7 +61,17 @@ RANGES = {
     "away_f": (65, 90, "Away temperature"),
     "away_minutes": (5, 120, "Away delay"),
 }
-KEYS = ("enabled", *RANGES)
+GARAGE_RANGES = {
+    "garage_left_open_minutes": (*GARAGE_LEFT_OPEN_RANGE, "Left-open alert delay"),
+    "garage_away_open_grace_minutes": (*GARAGE_GRACE_RANGE, "Arrival grace"),
+}
+GARAGE_FLAGS = {
+    "garage_alerts": "Garage alerts",
+    "garage_remote": "Remote garage control",
+}
+GARAGE_KEYS = (*GARAGE_RANGES, *GARAGE_FLAGS)
+KEYS = ("enabled", *RANGES, *GARAGE_KEYS)
+GARAGE_OFF = "The garage is not set up."
 
 Response = tuple[int, dict[str, Any]]
 
@@ -66,25 +87,44 @@ class SettingsTarget(Protocol):
 
     def remove_person(self, person_id: object) -> dict[str, Any]: ...
 
+    def publish(self) -> dict[str, Any]: ...
+
+
+class GarageTarget(Protocol):
+    gate: CommandGate
+    # The cap on one garage request: close wait plus note wait plus headroom.
+    timeout_seconds: float
+
+    def snapshot(self) -> dict | None: ...
+
+    def actor_tag(self, email: str) -> str: ...
+
 
 class SettingsError(ValueError):
     """A request body that cannot be applied; the message is shown to people."""
 
 
-def validate(body: Any, current: Mapping[str, Any]) -> dict[str, Any]:
+def validate(
+    body: Any, current: Mapping[str, Any], garage: bool = False
+) -> dict[str, Any]:
     """Check a settings body against the current settings; return the changes."""
     if not isinstance(body, dict):
         raise SettingsError("The request body must be a JSON object.")
     unknown = sorted(k for k in body if k not in KEYS)
     if unknown:
         raise SettingsError(f"Unknown setting: {unknown[0]}.")
+    if not garage and any(k in GARAGE_KEYS for k in body):
+        raise SettingsError(GARAGE_OFF)
     changes: dict[str, Any] = {}
     for key, value in body.items():
         if key == "enabled":
             if not isinstance(value, bool):
                 raise SettingsError("Automation must be true or false.")
+        elif key in GARAGE_FLAGS:
+            if not isinstance(value, bool):
+                raise SettingsError(f"{GARAGE_FLAGS[key]} must be true or false.")
         else:
-            low, high, label = RANGES[key]
+            low, high, label = {**RANGES, **GARAGE_RANGES}[key]
             if isinstance(value, bool) or not isinstance(value, int):
                 raise SettingsError(f"{label} must be a whole number.")
             if not low <= value <= high:
@@ -173,6 +213,12 @@ def _handle_people(
     return 200, document
 
 
+def origin_of(headers: Mapping[str, str]) -> Literal["home", "tunnel"]:
+    """``home`` only when the hub's nginx set ``X-Snaphouse-Origin`` to exactly
+    ``home``. Missing or anything else is the tunnel (the safe side)."""
+    return "home" if headers.get(ORIGIN_HEADER) == "home" else "tunnel"
+
+
 def handle(
     target: SettingsTarget,
     method: str,
@@ -180,6 +226,7 @@ def handle(
     headers: Mapping[str, str],
     body: bytes,
     lookup: Lookup = presence.neighbour_mac,
+    garage: GarageTarget | None = None,
 ) -> Response:
     """Answer one request. Header names are lower-case."""
     if path in PEOPLE_PATHS:
@@ -195,15 +242,64 @@ def handle(
     except (UnicodeDecodeError, ValueError):
         return 400, {"error": "The request body is not valid JSON."}
     try:
-        changes = validate(parsed, target.settings())
+        changes = validate(parsed, target.settings(), garage is not None)
     except SettingsError as error:
         return 400, {"error": str(error)}
+    if changes.get("garage_remote") is True and origin_of(headers) != "home":
+        return 403, {"error": "Turn remote control on from the home Wi-Fi."}
     return 200, target.apply_settings(changes)
+
+
+def _bounded_text(value: Any, limit: int) -> bool:
+    return isinstance(value, str) and 0 < len(value) <= limit
+
+
+async def handle_garage(
+    target: GarageTarget | None,
+    daemon: SettingsTarget,
+    method: str,
+    path: str,
+    headers: Mapping[str, str],
+    body: bytes,
+) -> Response:
+    """The two garage endpoints. Errors carry ``CommandError.status``."""
+    if target is None or path not in GARAGE_PATHS:
+        return 404, {"error": "Not found."}
+    if method != "POST":
+        return 405, {"error": "Use POST here."}
+    if headers.get(GUARD_HEADER) != "1":
+        return 403, {"error": "Missing the X-Snaphouse header."}
+    origin = origin_of(headers)
+    actor = None
+    if origin == "tunnel":
+        email = headers.get(ACCESS_EMAIL_HEADER, "")
+        if not email.strip():
+            return 403, {"error": "Sign in again to control the garage."}
+        actor = target.actor_tag(email.strip())
+    intent = path == GARAGE_INTENT
+    parsed = _json_object(body, ("action",) if intent else ("action", "nonce"))
+    if isinstance(parsed, tuple):
+        return parsed
+    action = parsed.get("action")
+    if not _bounded_text(action, MAX_ACTION) or action not in ("open", "close"):
+        return 400, {"error": "The action must be open or close."}
+    try:
+        if intent:
+            return 200, target.gate.intent(action, origin, actor)
+        nonce = parsed.get("nonce")
+        if not _bounded_text(nonce, MAX_NONCE):
+            return 400, {"error": "That request expired. Start again."}
+        await target.gate.command(action, nonce, origin, actor)
+    except CommandError as error:
+        return error.status, {"error": error.message}
+    return 200, daemon.publish()
 
 
 _REASONS = {
     200: "OK", 400: "Bad Request", 403: "Forbidden", 404: "Not Found",
     405: "Method Not Allowed", 409: "Conflict", 413: "Payload Too Large",
+    423: "Locked", 429: "Too Many Requests", 503: "Service Unavailable",
+    504: "Gateway Timeout",
 }
 
 
@@ -244,26 +340,37 @@ async def _read_request(
     return parts[0], parts[1].split("?", 1)[0], headers, int(length)
 
 
-def _serve_one(target: SettingsTarget, lookup: Lookup):
+def _serve_one(target: SettingsTarget, lookup: Lookup, garage: GarageTarget | None):
     async def connection(
         reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
         try:
+            # The read timeout covers only reading the request.
             async with asyncio.timeout(READ_TIMEOUT_SECONDS):
                 try:
                     method, path, headers, length = await _read_request(reader)
                 except (ValueError, asyncio.IncompleteReadError,
                         asyncio.LimitOverrunError):
                     response = _encode(400, {"error": "Malformed request."})
+                    request = None
                 else:
                     if length > MAX_BODY:
                         response = _encode(413, {"error": "The request is too large."})
+                        request = None
                     else:
                         body = await reader.readexactly(length) if length else b""
-                        code, document = handle(
-                            target, method, path, headers, body, lookup
-                        )
-                        response = _encode(code, document)
+                        request = (method, path, headers, body)
+            if request is not None:
+                method, path, headers, body = request
+                if path in GARAGE_PATHS:
+                    code, document = await _garage_request(
+                        target, garage, method, path, headers, body
+                    )
+                else:
+                    code, document = handle(
+                        target, method, path, headers, body, lookup, garage
+                    )
+                response = _encode(code, document)
             writer.write(response)
             await writer.drain()
         except (TimeoutError, ConnectionError, asyncio.IncompleteReadError):
@@ -276,11 +383,29 @@ def _serve_one(target: SettingsTarget, lookup: Lookup):
     return connection
 
 
+async def _garage_request(
+    target: SettingsTarget,
+    garage: GarageTarget | None,
+    method: str,
+    path: str,
+    headers: Mapping[str, str],
+    body: bytes,
+) -> Response:
+    if garage is None:
+        return await handle_garage(None, target, method, path, headers, body)
+    try:
+        async with asyncio.timeout(garage.timeout_seconds):
+            return await handle_garage(garage, target, method, path, headers, body)
+    except TimeoutError:
+        return 504, {"error": "The garage did not answer in time. Check the card."}
+
+
 async def start(
     target: SettingsTarget,
     host: str,
     port: int,
     lookup: Lookup = presence.neighbour_mac,
+    garage: GarageTarget | None = None,
 ) -> asyncio.Server:
     """Listen for requests; the caller closes the returned server."""
-    return await asyncio.start_server(_serve_one(target, lookup), host, port)
+    return await asyncio.start_server(_serve_one(target, lookup, garage), host, port)

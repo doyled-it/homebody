@@ -14,6 +14,7 @@ dependencies = [
     # machine homebody runs and its tests pass against a fake controller without
     # it. See AGENTS.md ("The Matter controller").
     "python-matter-server[server]>=8.1 ; sys_platform == 'linux'",
+    "aioesphomeapi>=44.19.0",
 ]
 
 [project.scripts]

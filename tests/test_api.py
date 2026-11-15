@@ -132,6 +132,8 @@ def test_settings_persist_across_a_restart_and_beat_local_toml(tmp_path):
     rig.daemon = rig.new_daemon()
     assert rig.daemon.settings() == {
         "enabled": True, "comfort_f": 70, "away_f": 82, "away_minutes": 30,
+        "garage_left_open_minutes": 15, "garage_away_open_grace_minutes": 5,
+        "garage_alerts": True, "garage_remote": False,
     }
     rig.wifi.home = {A.wifi_mac}
     rig.run_for(2 * MIN)
@@ -408,3 +410,382 @@ def test_resolve_device_order():
     assert api.resolve_device({}, table) == (None, "unknown")
     assert api.resolve_device({"x-real-ip": "192.0.2.6"}, table) == (None, "unknown")
     assert api.resolve_device({"x-real-ip": "192.0.2.5"}, table) == (PHONE, None)
+
+
+# The garage endpoints
+
+from test_garage_commands import make as make_garage  # noqa: E402
+
+INTENT = "/api/homebody/garage/intent"
+COMMAND = "/api/homebody/garage/command"
+HOME = {"x-snaphouse": "1", "x-snaphouse-origin": "home"}
+EMAIL = "cf-access-authenticated-user-email"
+TUNNEL = {"x-snaphouse": "1", EMAIL: "person@example.invalid"}
+
+
+class StubDaemon(StubSettings):
+    def __init__(self, target=None):
+        super().__init__()
+        self.target = target
+
+    def publish(self):
+        return {"version": 1, "garage": self.target.snapshot() if self.target else None}
+
+    def apply_settings(self, changes):
+        super().apply_settings(changes)
+        return self.publish()
+
+
+class GarageStub:
+    """What api.GarageTarget needs, over a real CommandGate."""
+
+    timeout_seconds = 5.0
+
+    def __init__(self, env):
+        self.env = env
+        self.gate = env.gate
+
+    def snapshot(self):
+        return {"door": self.env.model.state}
+
+    def actor_tag(self, email):
+        return self.env.audit.tag(email)
+
+
+def garage_rig(tmp_path, **kwargs):
+    env = make_garage(tmp_path, **kwargs)
+    target = GarageStub(env)
+    return env, target, StubDaemon(target)
+
+
+def gcall(target, daemon, path, body, headers=HOME, method="POST"):
+    raw = body if isinstance(body, bytes) else json.dumps(body).encode()
+    return asyncio.run(api.handle_garage(target, daemon, method, path, headers, raw))
+
+
+def full(target, daemon, action, headers=HOME):
+    code, intent = gcall(target, daemon, INTENT, {"action": action}, headers)
+    assert code == 200, intent
+    return gcall(
+        target, daemon, COMMAND, {"action": action, "nonce": intent["nonce"]}, headers
+    )
+
+
+@pytest.mark.parametrize("path", [INTENT, COMMAND])
+def test_garage_guard_header_is_403(tmp_path, path):
+    env, target, daemon = garage_rig(tmp_path)
+    for headers in ({}, {"x-snaphouse": "0"}, {"x-snaphouse-origin": "home"}):
+        code, doc = gcall(target, daemon, path, {"action": "close"}, headers)
+        assert code == 403 and "error" in doc
+    assert env.link.sent == []
+
+
+@pytest.mark.parametrize(
+    "headers, expected",
+    [
+        ({"x-snaphouse-origin": "home"}, "home"),
+        ({}, "tunnel"),
+        ({"x-snaphouse-origin": "HOME"}, "tunnel"),
+        ({"x-snaphouse-origin": "home "}, "tunnel"),
+        ({"x-snaphouse-origin": "home, tunnel"}, "tunnel"),
+        ({"x-snaphouse-origin": ""}, "tunnel"),
+        ({"x-snaphouse-origin": "tunnel"}, "tunnel"),
+        ({"cf-connecting-ip": "203.0.113.9"}, "tunnel"),
+        ({"cf-connecting-ip": "203.0.113.9", "x-snaphouse-origin": "home"}, "home"),
+    ],
+)
+def test_origin_home_only_when_header_is_exactly_home(headers, expected):
+    assert api.origin_of(headers) == expected
+
+
+def test_forged_forwarding_headers_do_not_make_a_request_home(tmp_path):
+    env, target, daemon = garage_rig(tmp_path)
+    forged = {"x-snaphouse": "1", "x-real-ip": "192.0.2.5", "x-forwarded-for": "x"}
+    code, doc = gcall(target, daemon, INTENT, {"action": "close"}, forged)
+    assert code == 403  # a tunnel request with no Access identity
+    assert env.link.sent == []
+
+
+@pytest.mark.parametrize("path", [INTENT, COMMAND])
+def test_tunnel_request_without_access_email_is_403(tmp_path, path):
+    env, target, daemon = garage_rig(tmp_path)
+    for headers in ({"x-snaphouse": "1"}, {"x-snaphouse": "1", EMAIL: ""}):
+        body = {"action": "close", "nonce": "x"}
+        code, _ = gcall(target, daemon, path, body, headers)
+        assert code == 403
+
+
+def test_intent_then_command_happy_path_home_and_tunnel(tmp_path):
+    env, target, daemon = garage_rig(tmp_path)
+    code, intent = gcall(target, daemon, INTENT, {"action": "open"})
+    assert code == 200
+    assert set(intent) == {"nonce", "expires_in", "confirm_required"}
+    assert intent["confirm_required"] is False and intent["expires_in"] == 30
+    code, doc = gcall(
+        target, daemon, COMMAND, {"action": "open", "nonce": intent["nonce"]}
+    )
+    assert code == 200 and doc == {"version": 1, "garage": {"door": "opening"}}
+    assert env.link.sent == ["open"]
+    # a no-op repeat is still a 200 with the document
+    env.link.settle()
+    code, doc = full(target, daemon, "open")
+    assert code == 200 and env.link.sent == ["open"] and "garage" in doc
+
+    env2, target2, daemon2 = garage_rig(tmp_path / "t")
+    code, intent = gcall(target2, daemon2, INTENT, {"action": "open"}, TUNNEL)
+    assert code == 200 and intent["confirm_required"] is True
+    code, doc = gcall(
+        target2, daemon2, COMMAND,
+        {"action": "open", "nonce": intent["nonce"]}, TUNNEL,
+    )
+    assert code == 200 and env2.link.sent == ["open"]
+    log = env2.audit.path.read_text()
+    assert "person@example.invalid" not in log
+    assert env2.audit.tag("person@example.invalid") in log
+
+
+@pytest.mark.parametrize("bad", [["open"], 5, None, "x" * 100_000, {"a": 1}, True])
+def test_command_bad_types_for_action_and_nonce_are_400(tmp_path, bad):
+    env, target, daemon = garage_rig(tmp_path)
+    for path, body in (
+        (INTENT, {"action": bad}),
+        (COMMAND, {"action": bad, "nonce": "x"}),
+        (COMMAND, {"action": "open", "nonce": bad}),
+    ):
+        code, doc = gcall(target, daemon, path, body)
+        assert code == 400 and "error" in doc
+    assert env.link.sent == []
+
+
+@pytest.mark.parametrize(
+    "raw", [b"", b"{oops", b"[]", b'"x"', b'{"action": "open", "extra": 1}'],
+)
+def test_garage_bodies_must_be_json_objects_with_known_keys(tmp_path, raw):
+    env, target, daemon = garage_rig(tmp_path)
+    assert gcall(target, daemon, INTENT, raw)[0] == 400
+    assert gcall(target, daemon, COMMAND, raw)[0] == 400
+
+
+def test_command_without_nonce_is_400(tmp_path):
+    env, target, daemon = garage_rig(tmp_path)
+    assert gcall(target, daemon, COMMAND, {"action": "open"})[0] == 400
+
+
+def test_nonce_for_other_action_and_spent_nonce_fail(tmp_path):
+    env, target, daemon = garage_rig(tmp_path, door="open")
+    nonce = gcall(target, daemon, INTENT, {"action": "open"})[1]["nonce"]
+    code, _ = gcall(target, daemon, COMMAND, {"action": "close", "nonce": nonce})
+    assert code == 400 and env.link.sent == []
+    nonce = gcall(target, daemon, INTENT, {"action": "close"})[1]["nonce"]
+    assert gcall(target, daemon, COMMAND, {"action": "close", "nonce": nonce})[0] == 200
+    code, _ = gcall(target, daemon, COMMAND, {"action": "close", "nonce": nonce})
+    assert code == 400 and env.link.sent == ["close"]
+
+
+def _code(env, target, daemon, action, headers=HOME):
+    return full(target, daemon, action, headers)[0]
+
+
+def test_every_error_code_maps(tmp_path):
+    seen: dict[int, str] = {}
+
+    env, target, daemon = garage_rig(tmp_path / "403", remote=False)
+    code, doc = full(target, daemon, "open", TUNNEL)
+    seen[code] = doc["error"]
+
+    env, target, daemon = garage_rig(tmp_path / "409", door="open")
+    env.link.push(obstruction=True)
+    code, doc = full(target, daemon, "close")
+    seen[code] = doc["error"]
+
+    env, target, daemon = garage_rig(tmp_path / "423")
+    env.link.push(lockout=True)
+    code, doc = full(target, daemon, "open")
+    seen[code] = doc["error"]
+
+    env, target, daemon = garage_rig(tmp_path / "429")
+    assert full(target, daemon, "open")[0] == 200
+    env.link.settle()
+    code, doc = full(target, daemon, "close")
+    seen[code] = doc["error"]
+
+    env, target, daemon = garage_rig(tmp_path / "503", connect=False)
+    code, doc = full(target, daemon, "open")
+    seen[code] = doc["error"]
+
+    env, target, daemon = garage_rig(tmp_path / "504")
+    env.link.swallow = True
+    code, doc = full(target, daemon, "open")
+    seen[code] = doc["error"]
+
+    assert sorted(seen) == [403, 409, 423, 429, 503, 504]
+    assert all(isinstance(m, str) and m for m in seen.values())
+
+
+def test_garage_paths_404_when_module_off():
+    stub = StubDaemon()
+    for path in (INTENT, COMMAND):
+        code, doc = asyncio.run(
+            api.handle_garage(None, stub, "POST", path, HOME, b'{"action": "open"}')
+        )
+        assert code == 404 and "error" in doc
+        assert api.handle(stub, "POST", path, HOME, b"{}")[0] == 404
+
+
+def test_garage_paths_reject_other_methods(tmp_path):
+    env, target, daemon = garage_rig(tmp_path)
+    for method in ("GET", "PUT", "DELETE"):
+        assert gcall(target, daemon, INTENT, {}, HOME, method)[0] == 405
+
+
+GARAGE_SETTINGS = [
+    {"garage_left_open_minutes": 0}, {"garage_left_open_minutes": 240},
+    {"garage_away_open_grace_minutes": 0}, {"garage_away_open_grace_minutes": 15},
+    {"garage_alerts": False}, {"garage_remote": False},
+]
+
+
+@pytest.mark.parametrize("body", GARAGE_SETTINGS)
+def test_settings_garage_keys_validate(tmp_path, body):
+    env, target, daemon = garage_rig(tmp_path)
+    code, doc = api.handle(daemon, "POST", PATH, GUARD, json.dumps(body).encode(),
+                           garage=target)
+    assert code == 200 and daemon.applied == [body]
+    assert doc["garage"] == {"door": "closed"}
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"garage_left_open_minutes": 241}, {"garage_left_open_minutes": -1},
+        {"garage_left_open_minutes": "5"}, {"garage_left_open_minutes": True},
+        {"garage_away_open_grace_minutes": 16}, {"garage_away_open_grace_minutes": 2.5},
+        {"garage_alerts": 1}, {"garage_alerts": "true"}, {"garage_remote": None},
+    ],
+)
+def test_settings_garage_keys_reject_bad_values(tmp_path, body):
+    env, target, daemon = garage_rig(tmp_path)
+    code, doc = api.handle(daemon, "POST", PATH, GUARD, json.dumps(body).encode(),
+                           garage=target)
+    assert code == 400 and "error" in doc and daemon.applied == []
+
+
+@pytest.mark.parametrize("body", GARAGE_SETTINGS)
+def test_settings_garage_keys_400_when_module_off(body):
+    stub = StubDaemon()
+    code, doc = api.handle(stub, "POST", PATH, GUARD, json.dumps(body).encode())
+    assert code == 400 and doc == {"error": "The garage is not set up."}
+    assert stub.applied == []
+
+
+def test_enabling_garage_remote_from_tunnel_is_403_but_disabling_is_allowed(tmp_path):
+    env, target, daemon = garage_rig(tmp_path)
+    on = json.dumps({"garage_remote": True}).encode()
+    off = json.dumps({"garage_remote": False}).encode()
+    for headers in (GUARD, TUNNEL, {**GUARD, "x-snaphouse-origin": "Home"}):
+        code, _ = api.handle(daemon, "POST", PATH, headers, on, garage=target)
+        assert code == 403
+    assert daemon.applied == []
+    assert api.handle(daemon, "POST", PATH, TUNNEL, off, garage=target)[0] == 200
+    assert api.handle(daemon, "POST", PATH, HOME, on, garage=target)[0] == 200
+    assert daemon.applied == [{"garage_remote": False}, {"garage_remote": True}]
+
+
+def test_people_and_climate_endpoints_unchanged_with_the_garage_on(tmp_path):
+    env, target, daemon = garage_rig(tmp_path)
+    code, doc = api.handle(
+        daemon, "POST", PATH, GUARD, b'{"comfort_f": 70}', garage=target
+    )
+    assert code == 200 and daemon.applied == [{"comfort_f": 70}]
+    assert api.handle(daemon, "GET", PATH, GUARD, b"", garage=target)[0] == 405
+    assert api.handle(daemon, "POST", "/api/homebody/other", GUARD, b"{}",
+                      garage=target)[0] == 404
+
+
+async def _raw(port, path, body, headers):
+    lines = [f"POST {path} HTTP/1.1", "Host: x", f"Content-Length: {len(body)}"]
+    lines += [f"{k}: {v}" for k, v in headers.items()]
+    return await _http(port, ("\r\n".join(lines) + "\r\n\r\n").encode() + body)
+
+
+def test_slow_close_does_not_block_a_concurrent_settings_post(tmp_path):
+    env, target, daemon = garage_rig(tmp_path, door="open", close_wait=0.6)
+    env.link.follow_commands = False  # the confirm wait runs its full course
+
+    async def scenario():
+        server = await api.start(daemon, "127.0.0.1", 0, garage=target)
+        port = server.sockets[0].getsockname()[1]
+        try:
+            nonce = (await _raw(port, INTENT, b'{"action":"close"}', HOME))[1]["nonce"]
+            body = json.dumps({"action": "close", "nonce": nonce}).encode()
+            slow = asyncio.ensure_future(_raw(port, COMMAND, body, HOME))
+            await asyncio.sleep(0.1)
+            started = asyncio.get_running_loop().time()
+            quick = await _raw(port, PATH, b'{"comfort_f": 70}', GUARD)
+            took = asyncio.get_running_loop().time() - started
+            return quick, took, slow.done(), await slow
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    quick, took, slow_done, slow = asyncio.run(scenario())
+    assert quick[0] == 200 and took < 0.3
+    assert slow_done is False
+    assert slow[0] == 504
+
+
+def test_command_wait_longer_than_the_read_timeout_is_not_cut_off(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(api, "READ_TIMEOUT_SECONDS", 0.2)
+    env, target, daemon = garage_rig(tmp_path, open_wait=0.5)
+    env.link.swallow = True
+
+    async def scenario():
+        server = await api.start(daemon, "127.0.0.1", 0, garage=target)
+        port = server.sockets[0].getsockname()[1]
+        try:
+            nonce = (await _raw(port, INTENT, b'{"action":"open"}', HOME))[1]["nonce"]
+            body = json.dumps({"action": "open", "nonce": nonce}).encode()
+            return await _raw(port, COMMAND, body, HOME)
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    code, doc = asyncio.run(scenario())
+    assert code == 504 and "No movement" in doc["error"]
+
+
+def test_the_garage_handler_has_its_own_cap(tmp_path):
+    env, target, daemon = garage_rig(tmp_path, open_wait=2.0)
+    target.timeout_seconds = 0.2
+    env.link.swallow = True
+
+    async def scenario():
+        server = await api.start(daemon, "127.0.0.1", 0, garage=target)
+        port = server.sockets[0].getsockname()[1]
+        try:
+            nonce = (await _raw(port, INTENT, b'{"action":"open"}', HOME))[1]["nonce"]
+            body = json.dumps({"action": "open", "nonce": nonce}).encode()
+            return await _raw(port, COMMAND, body, HOME)
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    code, doc = asyncio.run(scenario())
+    assert code == 504 and "error" in doc
+
+
+def test_the_garage_paths_over_http_need_the_guard(tmp_path):
+    env, target, daemon = garage_rig(tmp_path)
+
+    async def scenario():
+        server = await api.start(daemon, "127.0.0.1", 0, garage=target)
+        port = server.sockets[0].getsockname()[1]
+        try:
+            return await _raw(port, INTENT, b'{"action":"open"}', {})
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    assert asyncio.run(scenario())[0] == 403
