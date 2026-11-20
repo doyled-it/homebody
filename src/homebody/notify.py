@@ -20,6 +20,7 @@ log = logging.getLogger(__name__)
 
 # Waits before the second and third attempts: about a minute in all.
 _BACKOFF_SECONDS = (20.0, 40.0)
+USER_AGENT = "homebody/1"
 
 
 @dataclass(frozen=True)
@@ -46,7 +47,13 @@ class Notifier:
 
     def _request(self, alert: Alert) -> urllib.request.Request:
         cfg = self._config
-        headers = {"Title": alert.title, "Priority": alert.priority}
+        # A named agent: Cloudflare's browser integrity check refuses Python's
+        # default "Python-urllib" agent with 403 (error 1010).
+        headers = {
+            "Title": alert.title,
+            "Priority": alert.priority,
+            "User-Agent": USER_AGENT,
+        }
         if cfg.click_url:
             headers["Click"] = cfg.click_url
             headers["Actions"] = f"view, Open garage, {cfg.click_url}"

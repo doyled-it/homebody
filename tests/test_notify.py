@@ -43,6 +43,16 @@ def test_send_uses_bearer_token_only_when_configured(ntfy):
     assert ntfy.requests[-1].headers["Authorization"] == "Bearer example-token"
 
 
+def test_send_names_homebody_as_the_user_agent(ntfy):
+    # Cloudflare's browser integrity check answers Python's default
+    # "Python-urllib/x.y" agent with 403 (error 1010), so every alert
+    # through a tunnelled ntfy would be dropped.
+    notifier(ntfy).send_blocking(ALERT)
+    agent = ntfy.requests[-1].headers["User-Agent"]
+    assert agent.startswith("homebody/")
+    assert "urllib" not in agent.lower()
+
+
 def test_retries_three_times_then_returns_false(ntfy):
     sleeps = []
     ntfy.fail_next(5)
