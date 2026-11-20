@@ -45,7 +45,6 @@ class Person:
     name: str
     enabled: bool
     wifi_mac: str | None
-    bluetooth_mac: str | None = None
     # An opaque slug for the API and the web page; never a name or an address.
     id: str = ""
 
@@ -77,7 +76,6 @@ class GarageConfig:
 @dataclass(frozen=True)
 class Config:
     people: tuple[Person, ...] = ()
-    bluetooth_adapter: str | None = None
     comfort_f: int = 72
     away_f: int = 82
     away_minutes: int = 20
@@ -113,16 +111,20 @@ def _person(raw: dict[str, Any], index: int) -> Person:
     if not isinstance(name, str) or not name.strip():
         raise ConfigError(f"{where}: a name is required")
     wifi = _mac(raw.get("wifi_mac"), f"{where} wifi_mac")
-    bluetooth = _mac(raw.get("bluetooth_mac"), f"{where} bluetooth_mac")
-    if wifi is None and bluetooth is None:
-        raise ConfigError(f"{where}: needs a wifi_mac or a bluetooth_mac")
+    if wifi is None:
+        hint = (
+            " (bluetooth_mac is no longer used for presence)"
+            if "bluetooth_mac" in raw
+            else ""
+        )
+        raise ConfigError(f"{where}: needs a wifi_mac{hint}")
     enabled = raw.get("enabled", True)
     if not isinstance(enabled, bool):
         raise ConfigError(f"{where}: enabled must be true or false")
     pid = raw.get("id", f"person-{index + 1}")
     if not isinstance(pid, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,31}", pid):
         raise ConfigError(f"{where}: id must be a short lowercase slug")
-    return Person(name.strip(), enabled, wifi, bluetooth, pid)
+    return Person(name.strip(), enabled, wifi, pid)
 
 
 def _int(value: Any, key: str, default: int) -> int:
@@ -226,7 +228,12 @@ def parse(text: str) -> Config:
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"invalid TOML: {exc}") from None
     people = tuple(_person(p, i) for i, p in enumerate(data.get("person", [])))
-    adapter = _mac(data.get("bluetooth", {}).get("adapter"), "bluetooth adapter")
+    # Bluetooth presence was removed (issue #17). Old configs still load: the
+    # keys are ignored, with one warning per key (never the value).
+    if any("bluetooth_mac" in p for p in data.get("person", [])):
+        log.warning("person bluetooth_mac is no longer used and is ignored")
+    if "adapter" in data.get("bluetooth", {}):
+        log.warning("[bluetooth] adapter is no longer used and is ignored")
     climate = data.get("climate", {})
     matter = data.get("matter", {})
     url = matter.get("url", DEFAULT_MATTER_URL)
@@ -252,7 +259,6 @@ def parse(text: str) -> Config:
         garage=garage,
         garage_error=garage_error,
         people=people,
-        bluetooth_adapter=adapter,
         comfort_f=_int(climate.get("comfort_f"), "comfort_f", 72),
         away_f=_int(climate.get("away_f"), "away_f", 82),
         away_minutes=_int(climate.get("away_minutes"), "away_minutes", 20),

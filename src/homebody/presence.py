@@ -1,16 +1,16 @@
 """Presence: who is home, from the house's own network.
 
 A person is *seen* when one of their devices answers a probe: Wi-Fi through the
-kernel neighbour table confirmed by an ARP probe, or Bluetooth through ``l2ping``
-as a fallback once Wi-Fi has been quiet for five minutes (phones drop Wi-Fi
-while asleep). A person is *home* for 20 minutes after they were last seen and
-*away* after that. After a restart nobody has been observed, so presence is
-*unknown* (never "away") until someone is seen or one full away window has been
-watched. Disabled people are never probed and never count.
+kernel neighbour table confirmed by an ARP probe. (There was once an ``l2ping``
+Bluetooth fallback. It was removed because every ``l2ping`` triggered a kernel
+crash on the hub, issue #17.) A person is *home* for 20 minutes after they were
+last seen and *away* after that. After a restart nobody has been observed, so
+presence is *unknown* (never "away") until someone is seen or one full away
+window has been watched. Disabled people are never probed and never count.
 
-The probes and the clock are injected so the logic is tested without a network,
-a Bluetooth adapter, or real time. The two probe classes at the bottom are the
-real ones; they never raise, a failed probe just means "not seen".
+The probe and the clock are injected so the logic is tested without a network
+or real time. The probe class at the bottom is the real one; it never raises, a
+failed probe just means "not seen".
 """
 
 from __future__ import annotations
@@ -32,18 +32,12 @@ UNKNOWN = "unknown"
 
 AWAY_WINDOW_SECONDS = 20 * 60.0
 WIFI_INTERVAL_SECONDS = 60.0
-BLUETOOTH_AFTER_SECONDS = 5 * 60.0
-BLUETOOTH_INTERVAL_SECONDS = 60.0
 
 Runner = Callable[[Sequence[str], float], tuple[int, str]]
 
 
 class WifiProbe(Protocol):
     def seen(self, mac: str) -> bool: ...
-
-
-class BluetoothProbe(Protocol):
-    def ping(self, mac: str) -> bool: ...
 
 
 @dataclass(frozen=True)
@@ -65,7 +59,6 @@ class _Tracked:
         self.last_seen: float | None = None
         self.last_wifi_seen: float | None = None
         self.last_signal: str | None = None
-        self.last_bt_attempt: float | None = None
         self.started = started
         self.enabled = person.enabled
 
@@ -76,12 +69,10 @@ class PresenceTracker:
         people: Sequence[Person],
         *,
         wifi: WifiProbe,
-        bluetooth: BluetoothProbe,
         clock: Callable[[], float],
         away_window: float = AWAY_WINDOW_SECONDS,
     ) -> None:
         self._wifi = wifi
-        self._bluetooth = bluetooth
         self._clock = clock
         self._window = away_window
         self._started = clock()
@@ -103,11 +94,6 @@ class PresenceTracker:
             if wifi_due and t.person.wifi_mac and self._probe_wifi(t.person.wifi_mac):
                 t.last_seen = t.last_wifi_seen = now
                 t.last_signal = "wifi"
-            if self._bluetooth_due(t, now):
-                t.last_bt_attempt = now
-                if self._probe_bluetooth(t.person.bluetooth_mac):
-                    t.last_seen = now
-                    t.last_signal = "bluetooth"
 
     def _active(self) -> list[_Tracked]:
         return [t for t in self._tracked if t.enabled]
@@ -123,7 +109,7 @@ class PresenceTracker:
                 if enabled and not t.enabled:
                     t.started = self._clock()
                     t.last_seen = t.last_wifi_seen = None
-                    t.last_signal = t.last_bt_attempt = None
+                    t.last_signal = None
                 t.enabled = enabled
                 return True
         return False
@@ -159,29 +145,11 @@ class PresenceTracker:
     def enabled_flags(self) -> dict[str, bool]:
         return {t.person.id: t.enabled for t in self._tracked}
 
-    def _bluetooth_due(self, t: _Tracked, now: float) -> bool:
-        if not t.person.bluetooth_mac:
-            return False
-        quiet_since = t.last_wifi_seen if t.last_wifi_seen is not None else t.started
-        if now - quiet_since < BLUETOOTH_AFTER_SECONDS:
-            return False
-        return (
-            t.last_bt_attempt is None
-            or now - t.last_bt_attempt >= BLUETOOTH_INTERVAL_SECONDS
-        )
-
     def _probe_wifi(self, mac: str) -> bool:
         try:
             return bool(self._wifi.seen(mac))
         except Exception:
             log.exception("wifi probe failed")
-            return False
-
-    def _probe_bluetooth(self, mac: str) -> bool:
-        try:
-            return bool(self._bluetooth.ping(mac))
-        except Exception:
-            log.exception("bluetooth probe failed")
             return False
 
     def _state(self, t: _Tracked, now: float) -> str:
@@ -231,7 +199,7 @@ class NeighbourWifiProbe:
     A REACHABLE entry for the address is proof the kernel just heard from the
     device. Otherwise the last known IP (from the table, remembered across
     entries vanishing) is ARP-pinged with ``arping``; a reply is proof. Both
-    ``arping`` and ``l2ping`` need CAP_NET_RAW (see AGENTS.md, "Presence").
+    ``arping`` needs CAP_NET_RAW (see AGENTS.md, "Presence").
     """
 
     _BAD = {"FAILED", "INCOMPLETE"}
@@ -291,23 +259,3 @@ def neighbour_mac(ip: str, runner: Runner = run_command) -> str | None:
         if index < len(parts):
             return parts[index].lower()
     return None
-
-
-class L2pingBluetoothProbe:
-    """Bluetooth presence: one ``l2ping`` of a paired device."""
-
-    def __init__(self, adapter: str | None, runner: Runner = run_command) -> None:
-        self._adapter = adapter
-        self._runner = runner
-
-    def ping(self, mac: str) -> bool:
-        cmd = ["l2ping"]
-        if self._adapter:
-            cmd += ["-i", self._adapter]
-        cmd += ["-c", "1", "-t", "3", mac]
-        try:
-            rc, _ = self._runner(cmd, 8)
-        except (OSError, subprocess.SubprocessError):
-            log.warning("bluetooth probe could not run")
-            return False
-        return rc == 0

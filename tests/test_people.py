@@ -39,7 +39,7 @@ def test_bad_saved_people_are_skipped():
     ]
     people = parse_saved(raw)
     assert [p.name for p in people] == ["Sam"]
-    assert people[0].enabled is True and people[0].bluetooth_mac is None
+    assert people[0].enabled is True
     assert parse_saved({"not": "a list"}) == []
 
 

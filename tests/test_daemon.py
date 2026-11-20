@@ -29,8 +29,8 @@ _CLUSTER = matter.THERMOSTAT_CLUSTER_ID
 SETPOINT_PATH = f"1/{_CLUSTER}/{matter.ATTR_OCCUPIED_COOLING_SETPOINT}"
 MODE_PATH = f"1/{_CLUSTER}/{matter.ATTR_SYSTEM_MODE}"
 
-A = Person("Person A", True, "aa:00:00:00:00:01", None, "person-a")
-B = Person("Person B", False, "aa:00:00:00:00:02", None, "person-b")
+A = Person("Person A", True, "aa:00:00:00:00:01", "person-a")
+B = Person("Person B", False, "aa:00:00:00:00:02", "person-b")
 
 
 class Clock:
@@ -52,11 +52,6 @@ class Wifi:
     def seen(self, mac: str) -> bool:
         self.probed.append(mac)
         return mac in self.home
-
-
-class NoBluetooth:
-    def ping(self, mac: str) -> bool:
-        return False
 
 
 class FlakyController(FakeController):
@@ -90,7 +85,6 @@ class Rig:
         presence = PresenceTracker(
             self.config.people,
             wifi=self.wifi,
-            bluetooth=NoBluetooth(),
             clock=self.clock,
             away_window=self.config.away_minutes * MIN,
         )

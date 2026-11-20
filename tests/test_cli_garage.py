@@ -16,7 +16,7 @@ from garage_fakes import FakeGarageLink
 from homebody import cli, daemon
 from homebody.config import Config, GarageConfig
 from homebody.presence import PresenceTracker
-from test_daemon import A, Clock, NoBluetooth, Wifi
+from test_daemon import A, Clock, Wifi
 
 HEADERS = {"X-Snaphouse": "1", "X-Snaphouse-Origin": "home"}
 
@@ -60,7 +60,6 @@ def test_homebody_run_wires_the_garage_through_api_publish_and_status(tmp_path):
         presence = PresenceTracker(
             config.people,
             wifi=Wifi(),
-            bluetooth=NoBluetooth(),
             clock=clock,
             away_window=config.away_minutes * 60.0,
         )
@@ -138,7 +137,6 @@ def test_homebody_run_starts_as_today_when_garage_is_not_configured(tmp_path):
         presence = PresenceTracker(
             config.people,
             wifi=Wifi(),
-            bluetooth=NoBluetooth(),
             clock=clock,
             away_window=config.away_minutes * 60.0,
         )

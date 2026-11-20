@@ -35,7 +35,7 @@ src/homebody/
   __init__.py   the version
   matter.py     the thin Matter controller client (WebSocket), unit conversions
   config.py     reads /etc/homebody/local.toml into typed settings
-  presence.py   who is home: Wi-Fi and Bluetooth probes, the 20 minute window
+  presence.py   who is home: the Wi-Fi probe, the 20 minute window
   climate.py    pure decisions: transitions, override, pacing, backoff
   daemon.py     the service loop, the atomic state file, runtime settings
   status.py     the homebody.json document and its atomic writer
@@ -85,21 +85,23 @@ and the Thermostat cluster (0x0201) constants.
 
 `presence.py` decides who is home from injected probes and an injected clock.
 Wi-Fi (`NeighbourWifiProbe`) reads `ip -4 neigh show` and confirms a non-REACHABLE
-entry with one `arping` of the last known IP. Bluetooth (`L2pingBluetoothProbe`)
-runs one `l2ping` through the adapter from `[bluetooth] adapter` in the local
-config, only after 5 minutes without Wi-Fi and at most once a minute. A person is
+entry with one `arping` of the last known IP. Presence is Wi-Fi only: the
+Bluetooth `l2ping` fallback was removed because every `l2ping` triggered a kernel
+crash on the hub (issue #17). A config that still has `[bluetooth] adapter` or a
+person's `bluetooth_mac` loads, ignores them, and logs one warning per key; a
+person needs a `wifi_mac`. A person is
 home for 20 minutes after the last sighting. After a restart presence is unknown,
 not away, until someone is seen or a full window has been watched. Disabled people
 are skipped by every probe. `set_enabled(id, flag)` flips a person at runtime (the
 daemon persists the flag in its state and applies it over the local.toml default);
 off stops probing and counting at once, on restarts observation from unknown.
 
-Privilege: `arping` and `l2ping` open raw sockets, which need root or
+Privilege: `arping` opens a raw socket, which needs root or
 `CAP_NET_RAW`. The `homebody` service user is not root, so the systemd unit (owned
 by the snaphouse `homebody_bootstrap` role) must set `AmbientCapabilities=CAP_NET_RAW`
 and `CapabilityBoundingSet=CAP_NET_RAW`, and if it uses `RestrictAddressFamilies`
-allow `AF_INET AF_NETLINK AF_BLUETOOTH`. The hub also needs `iproute2`,
-`iputils-arping`, and `bluez` (for `l2ping`) installed. The unit lands with the
+allow `AF_INET AF_NETLINK`. The hub also needs `iproute2` and
+`iputils-arping` installed (`bluez` is no longer needed by homebody). The unit lands with the
 daemon task; until then nothing runs these probes.
 
 ## Decisions and the daemon
