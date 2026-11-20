@@ -37,10 +37,56 @@ def test_loads_people_and_normalises_addresses():
     a, b = cfg.people
     assert (a.name, a.enabled) == ("Person A", True)
     assert a.wifi_mac == "aa:bb:cc:00:00:01"
-    assert a.bluetooth_mac == "aa:bb:cc:00:00:02"
     assert b.enabled is False
-    assert b.bluetooth_mac is None
-    assert cfg.bluetooth_adapter == "00:00:00:00:00:01"
+
+
+def test_old_config_with_both_bluetooth_keys_loads_and_warns_per_key(caplog):
+    with caplog.at_level("WARNING", logger="homebody.config"):
+        cfg = config.parse(EXAMPLE)
+    assert cfg.people[0].wifi_mac == "aa:bb:cc:00:00:01"
+    assert not hasattr(cfg.people[0], "bluetooth_mac")
+    assert not hasattr(cfg, "bluetooth_adapter")
+    text = " ".join(r.getMessage() for r in caplog.records)
+    assert text.count("bluetooth_mac") == 1 and text.count("adapter") == 1
+
+
+def test_bluetooth_mac_with_wifi_mac_warns_once_and_is_ignored(caplog):
+    text = (
+        '[[person]]\nname = "X"\nwifi_mac = "aa:bb:cc:00:00:01"\n'
+        'bluetooth_mac = "aa:bb:cc:00:00:02"\n'
+        '[[person]]\nname = "Y"\nwifi_mac = "aa:bb:cc:00:00:03"\n'
+        'bluetooth_mac = "aa:bb:cc:00:00:04"\n'
+    )
+    with caplog.at_level("WARNING", logger="homebody.config"):
+        cfg = config.parse(text)
+    assert [p.wifi_mac for p in cfg.people] == [
+        "aa:bb:cc:00:00:01",
+        "aa:bb:cc:00:00:03",
+    ]
+    messages = [r.getMessage() for r in caplog.records]
+    warned = [m for m in messages if "bluetooth_mac" in m]
+    assert len(warned) == 1
+    assert "no longer used" in warned[0]
+    assert "aa:bb:cc" not in warned[0]
+
+
+def test_bluetooth_adapter_loads_with_a_warning(caplog):
+    text = '[bluetooth]\nadapter = "00:00:00:00:00:01"\n'
+    with caplog.at_level("WARNING", logger="homebody.config"):
+        cfg = config.parse(text)
+    assert cfg.people == ()
+    warned = [m for m in (r.getMessage() for r in caplog.records) if "adapter" in m]
+    assert len(warned) == 1 and "no longer used" in warned[0]
+    assert "00:00:00" not in warned[0]
+
+
+def test_person_with_only_a_bluetooth_mac_is_rejected():
+    text = '[[person]]\nname = "X"\nbluetooth_mac = "aa:bb:cc:00:00:02"\n'
+    with pytest.raises(config.ConfigError) as err:
+        config.parse(text)
+    msg = str(err.value)
+    assert "needs a wifi_mac" in msg and "bluetooth_mac is no longer used" in msg
+    assert "aa:bb:cc" not in msg
 
 
 def test_climate_values_and_defaults():
@@ -49,7 +95,6 @@ def test_climate_values_and_defaults():
     bare = config.parse("")
     assert (bare.comfort_f, bare.away_f, bare.away_minutes) == (72, 82, 20)
     assert bare.people == ()
-    assert bare.bluetooth_adapter is None
 
 
 def test_enabled_defaults_to_true():

@@ -25,16 +25,14 @@ Nest Thermostat (2020), which supports Matter for local control.
 
 Each person has one or more devices, configured in an untracked local file on the
 hub (`/etc/homebody/local.toml`): a Wi-Fi hardware address (the phone's fixed
-private address for this network) and optionally a Bluetooth address (the owner's
-Pixel is already paired with the hub). A person is **seen** when any of their
-devices answers:
+private address for this network). A person is **seen** when their device
+answers:
 
 - Wi-Fi: the device's address appears in the hub's neighbour table with a reachable
   state, confirmed by an active probe (ARP ping of its last known IP every 60 s).
-- Bluetooth: an `l2ping` of a paired device, tried only when Wi-Fi has not seen the
-  person for 5 minutes (phones drop Wi-Fi while asleep), at most once a minute,
-  through the hub's Bluetooth receive adapter (call: the adapter that already
-  receives from the phone; a ping is tiny next to audio).
+Update: the Bluetooth `l2ping` fallback this section once described was removed
+(issue #17). Every `l2ping` triggered a kernel crash on the hub, so presence is
+Wi-Fi only.
 
 A person is **home** while they have been seen within the last 20 minutes, **away**
 after that. The house is **occupied** when any enabled person is home. Nothing

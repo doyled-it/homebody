@@ -1,6 +1,6 @@
 """Tests for presence tracking (src/homebody/presence.py).
 
-Probes and the clock are injected, so no network, Bluetooth adapter, or real time
+Probes and the clock are injected, so no network or real time
 is involved. Times are seconds on a fake monotonic clock.
 """
 
@@ -36,26 +36,16 @@ class FakeWifi:
         return mac in self.visible
 
 
-class FakeBluetooth:
-    def __init__(self) -> None:
-        self.visible: set[str] = set()
-        self.calls: list[str] = []
-
-    def ping(self, mac: str) -> bool:
-        self.calls.append(mac)
-        return mac in self.visible
-
-
-A = Person("A", True, "aa:00:00:00:00:01", "bb:00:00:00:00:01", "a")
-B = Person("B", False, "aa:00:00:00:00:02", "bb:00:00:00:00:02", "b")
-C = Person("C", True, "aa:00:00:00:00:03", None, "c")
+A = Person("A", True, "aa:00:00:00:00:01", "a")
+B = Person("B", False, "aa:00:00:00:00:02", "b")
+C = Person("C", True, "aa:00:00:00:00:03", "c")
 
 
 def make(people, clock=None):
     clock = clock or Clock()
-    wifi, bt = FakeWifi(), FakeBluetooth()
-    tracker = presence.PresenceTracker(people, wifi=wifi, bluetooth=bt, clock=clock)
-    return tracker, wifi, bt, clock
+    wifi = FakeWifi()
+    tracker = presence.PresenceTracker(people, wifi=wifi, clock=clock)
+    return tracker, wifi, clock
 
 
 def step(tracker, clock, seconds=MIN):
@@ -71,7 +61,7 @@ def state(tracker, name):
 
 
 def test_wifi_seen_marks_home_immediately():
-    tracker, wifi, _, _ = make([A])
+    tracker, wifi, _ = make([A])
     wifi.visible.add(A.wifi_mac)
     tracker.poll()
     s = state(tracker, "A")
@@ -81,7 +71,7 @@ def test_wifi_seen_marks_home_immediately():
 
 
 def test_home_until_exactly_the_away_window_then_away():
-    tracker, wifi, _, clock = make([A])
+    tracker, wifi, clock = make([A])
     wifi.visible.add(A.wifi_mac)
     tracker.poll()
     wifi.visible.clear()
@@ -96,7 +86,7 @@ def test_home_until_exactly_the_away_window_then_away():
 
 
 def test_wifi_probed_at_most_once_a_minute():
-    tracker, wifi, _, clock = make([A])
+    tracker, wifi, clock = make([A])
     tracker.poll()
     clock.advance(30)
     tracker.poll()
@@ -107,7 +97,7 @@ def test_wifi_probed_at_most_once_a_minute():
 
 
 def test_wifi_seen_again_resets_the_window():
-    tracker, wifi, _, clock = make([A])
+    tracker, wifi, clock = make([A])
     wifi.visible.add(A.wifi_mac)
     tracker.poll()
     wifi.visible.clear()
@@ -121,55 +111,11 @@ def test_wifi_seen_again_resets_the_window():
     assert state(tracker, "A").state == presence.HOME
 
 
-# Bluetooth fallback
+# No Bluetooth fallback (removed, issue #17)
 
 
-def test_bluetooth_not_tried_before_five_minutes_without_wifi():
-    tracker, wifi, bt, clock = make([A])
-    wifi.visible.add(A.wifi_mac)
-    tracker.poll()
-    wifi.visible.clear()
-    for _ in range(4):
-        step(tracker, clock)
-    assert bt.calls == []  # 4 minutes since last Wi-Fi
-    step(tracker, clock)  # 5 minutes
-    assert bt.calls == [A.bluetooth_mac]
-
-
-def test_bluetooth_at_most_once_a_minute():
-    tracker, wifi, bt, clock = make([A])
-    wifi.visible.add(A.wifi_mac)
-    tracker.poll()
-    wifi.visible.clear()
-    clock.advance(5 * MIN)
-    tracker.poll()
-    clock.advance(20)
-    tracker.poll()
-    clock.advance(20)
-    tracker.poll()
-    assert len(bt.calls) == 1
-    clock.advance(20)
-    tracker.poll()
-    assert len(bt.calls) == 2
-
-
-def test_bluetooth_seen_keeps_a_sleeping_phone_home():
-    """Review Focus 1: Wi-Fi asleep for 15 to 25 minutes, the house stays occupied."""
-    tracker, wifi, bt, clock = make([A])
-    wifi.visible.add(A.wifi_mac)
-    tracker.poll()
-    wifi.visible.clear()
-    bt.visible.add(A.bluetooth_mac)
-    for _ in range(30):
-        step(tracker, clock)
-        assert tracker.occupied() is True
-    s = state(tracker, "A")
-    assert s.state == presence.HOME
-    assert s.signal == "bluetooth"
-
-
-def test_wifi_asleep_ten_to_fifteen_minutes_stays_home_even_without_bluetooth():
-    tracker, wifi, _, clock = make([A])
+def test_wifi_asleep_ten_to_fifteen_minutes_stays_home():
+    tracker, wifi, clock = make([A])
     wifi.visible.add(A.wifi_mac)
     tracker.poll()
     wifi.visible.clear()
@@ -181,49 +127,37 @@ def test_wifi_asleep_ten_to_fifteen_minutes_stays_home_even_without_bluetooth():
     assert state(tracker, "A").signal == "wifi"
 
 
-def test_bluetooth_ping_failure_does_not_extend_the_window():
-    tracker, wifi, bt, clock = make([A])
-    wifi.visible.add(A.wifi_mac)
-    tracker.poll()
-    wifi.visible.clear()
-    clock.advance(WINDOW)
-    tracker.poll()
+def test_silent_wifi_means_away_after_the_window_and_never_runs_l2ping():
+    runner = Runner({"ip": (0, ""), "arping": (1, ""), "l2ping": (0, "")})
+    clock = Clock()
+    tracker = presence.PresenceTracker(
+        [A], wifi=presence.NeighbourWifiProbe(runner=runner), clock=clock
+    )
+    for _ in range(25):
+        step(tracker, clock)
     assert state(tracker, "A").state == presence.AWAY
-    assert bt.calls  # it tried, and failed
+    assert tracker.occupied() is False
+    assert all(cmd[0] != "l2ping" for cmd in runner.cmds)
 
 
-def test_no_bluetooth_probe_without_a_bluetooth_address():
-    tracker, _, bt, clock = make([C])
-    for _ in range(10):
-        step(tracker, clock)
-    assert bt.calls == []
-
-
-def test_bluetooth_fallback_counts_from_boot_when_wifi_never_seen():
-    tracker, _, bt, clock = make([A])
-    tracker.poll()
-    for _ in range(4):
-        step(tracker, clock)
-    assert bt.calls == []
-    step(tracker, clock)
-    assert len(bt.calls) == 1
+def test_presence_module_has_no_bluetooth_probe():
+    assert not hasattr(presence, "L2pingBluetoothProbe")
+    assert not hasattr(presence, "BluetoothProbe")
 
 
 # Disabled people (Review Focus 4)
 
 
 def test_disabled_person_is_never_probed():
-    tracker, wifi, bt, clock = make([B])
+    tracker, wifi, clock = make([B])
     wifi.visible.add(B.wifi_mac)
-    bt.visible.add(B.bluetooth_mac)
     for _ in range(30):
         step(tracker, clock)
     assert wifi.calls == []
-    assert bt.calls == []
 
 
 def test_disabled_person_never_affects_occupancy():
-    tracker, wifi, _, clock = make([A, B])
+    tracker, wifi, clock = make([A, B])
     wifi.visible.add(B.wifi_mac)
     tracker.poll()
     assert tracker.occupied() is None
@@ -234,7 +168,7 @@ def test_disabled_person_never_affects_occupancy():
 
 
 def test_only_disabled_people_means_unknown_forever():
-    tracker, _, _, clock = make([B])
+    tracker, _, clock = make([B])
     for _ in range(30):
         step(tracker, clock)
     assert tracker.occupied() is None
@@ -244,25 +178,23 @@ def test_only_disabled_people_means_unknown_forever():
 
 
 def test_person_disabled_at_runtime_stops_being_probed_and_counted():
-    tracker, wifi, bt, clock = make([A, C])
+    tracker, wifi, clock = make([A, C])
     wifi.visible.update({A.wifi_mac, C.wifi_mac})
     tracker.poll()
     assert tracker.occupied() is True
     assert tracker.set_enabled("a", False) is True
     wifi.calls.clear()
-    bt.calls.clear()
     wifi.visible.discard(C.wifi_mac)
     for _ in range(30):
         step(tracker, clock)
     assert A.wifi_mac not in wifi.calls
-    assert A.bluetooth_mac not in bt.calls
     assert [s.name for s in tracker.statuses()] == ["C"]
     assert tracker.enabled_flags() == {"a": False, "c": True}
     assert tracker.occupied() is False  # A's old sighting does not count
 
 
 def test_disabling_the_only_home_person_takes_effect_at_once():
-    tracker, wifi, _, _ = make([A])
+    tracker, wifi, _ = make([A])
     wifi.visible.add(A.wifi_mac)
     tracker.poll()
     tracker.set_enabled("a", False)
@@ -270,7 +202,7 @@ def test_disabling_the_only_home_person_takes_effect_at_once():
 
 
 def test_person_enabled_at_runtime_starts_unknown_then_is_probed():
-    tracker, wifi, _, clock = make([B])
+    tracker, wifi, clock = make([B])
     for _ in range(30):
         step(tracker, clock)
     assert wifi.calls == []
@@ -282,7 +214,7 @@ def test_person_enabled_at_runtime_starts_unknown_then_is_probed():
 
 
 def test_enabling_again_forgets_the_old_sighting():
-    tracker, wifi, _, clock = make([A])
+    tracker, wifi, clock = make([A])
     wifi.visible.add(A.wifi_mac)
     tracker.poll()
     tracker.set_enabled("a", False)
@@ -301,7 +233,7 @@ def test_set_enabled_unknown_id_is_false():
 
 
 def test_starts_unknown_and_not_away_before_a_full_window():
-    tracker, _, _, clock = make([A])
+    tracker, _, clock = make([A])
     tracker.poll()
     assert tracker.occupied() is None
     assert state(tracker, "A").state == presence.UNKNOWN
@@ -311,7 +243,7 @@ def test_starts_unknown_and_not_away_before_a_full_window():
 
 
 def test_never_seen_becomes_away_after_one_full_window_of_observation():
-    tracker, _, _, clock = make([A])
+    tracker, _, clock = make([A])
     tracker.poll()
     clock.advance(WINDOW)
     tracker.poll()
@@ -320,7 +252,7 @@ def test_never_seen_becomes_away_after_one_full_window_of_observation():
 
 
 def test_seen_after_boot_marks_home_on_the_next_probe():
-    tracker, wifi, _, clock = make([A])
+    tracker, wifi, clock = make([A])
     tracker.poll()
     wifi.visible.add(A.wifi_mac)
     step(tracker, clock)
@@ -328,14 +260,14 @@ def test_seen_after_boot_marks_home_on_the_next_probe():
 
 
 def test_one_person_home_one_unknown_is_occupied():
-    tracker, wifi, _, _ = make([A, C])
+    tracker, wifi, _ = make([A, C])
     wifi.visible.add(A.wifi_mac)
     tracker.poll()
     assert tracker.occupied() is True
 
 
 def test_one_away_one_home_is_occupied():
-    tracker, wifi, _, clock = make([A, C])
+    tracker, wifi, clock = make([A, C])
     tracker.poll()
     clock.advance(WINDOW - MIN)
     wifi.visible.add(C.wifi_mac)
@@ -358,7 +290,7 @@ def test_probe_exceptions_are_contained():
             raise RuntimeError("probe broke")
 
     clock = Clock()
-    tracker = presence.PresenceTracker([A], wifi=Boom(), bluetooth=Boom(), clock=clock)
+    tracker = presence.PresenceTracker([A], wifi=Boom(), clock=clock)
     tracker.poll()
     clock.advance(6 * MIN)
     tracker.poll()
@@ -366,7 +298,7 @@ def test_probe_exceptions_are_contained():
 
 
 def test_status_reports_last_seen_age():
-    tracker, wifi, _, clock = make([A])
+    tracker, wifi, clock = make([A])
     wifi.visible.add(A.wifi_mac)
     tracker.poll()
     wifi.visible.clear()
@@ -444,27 +376,6 @@ def test_wifi_probe_survives_missing_tools_and_timeouts():
         assert probe.seen("aa:00:00:00:00:01") is False
 
 
-def test_l2ping_uses_the_adapter_and_one_packet():
-    runner = Runner({"l2ping": (0, "")})
-    probe = presence.L2pingBluetoothProbe(adapter="00:00:00:00:00:01", runner=runner)
-    assert probe.ping("bb:00:00:00:00:01") is True
-    cmd = runner.cmds[0]
-    assert cmd[0] == "l2ping"
-    assert cmd[cmd.index("-i") + 1] == "00:00:00:00:00:01"
-    assert cmd[cmd.index("-c") + 1] == "1"
-    assert cmd[-1] == "bb:00:00:00:00:01"
-
-
-def test_l2ping_failure_and_missing_tool_are_not_seen():
-    runner = Runner({"l2ping": (1, "")})
-    probe = presence.L2pingBluetoothProbe(adapter=None, runner=runner)
-    assert probe.ping("bb:00:00:00:00:01") is False
-    assert "-i" not in runner.cmds[0]
-    missing = Runner({"l2ping": FileNotFoundError()})
-    gone = presence.L2pingBluetoothProbe(None, runner=missing)
-    assert gone.ping("bb:00:00:00:00:01") is False
-
-
 def test_subprocess_runner_runs_a_real_command():
     rc, out = presence.run_command(["echo", "hi"], timeout=5)
     assert (rc, out.strip()) == (0, "hi")
@@ -473,10 +384,10 @@ def test_subprocess_runner_runs_a_real_command():
 def test_added_person_is_tracked_and_removable():
     clock, wifi = Clock(), FakeWifi()
     tracker = presence.PresenceTracker(
-        [Person("Alex", True, "02:00:00:00:00:01", None, "person-1")],
-        wifi=wifi, bluetooth=FakeBluetooth(), clock=clock,
+        [Person("Alex", True, "02:00:00:00:00:01", "person-1")],
+        wifi=wifi, clock=clock,
     )
-    tracker.add_person(Person("Sam", True, "02:00:00:00:00:0a", None, "added-0000000a"))
+    tracker.add_person(Person("Sam", True, "02:00:00:00:00:0a", "added-0000000a"))
     by_id = {s.id: s for s in tracker.statuses()}
     assert by_id["added-0000000a"].removable is True
     assert by_id["added-0000000a"].state == presence.UNKNOWN
@@ -491,8 +402,8 @@ def test_added_person_is_tracked_and_removable():
 
 def test_configured_person_cannot_be_removed():
     tracker = presence.PresenceTracker(
-        [Person("Alex", True, "02:00:00:00:00:01", None, "person-1")],
-        wifi=FakeWifi(), bluetooth=FakeBluetooth(), clock=Clock(),
+        [Person("Alex", True, "02:00:00:00:00:01", "person-1")],
+        wifi=FakeWifi(), clock=Clock(),
     )
     assert tracker.remove_person("person-1") is False
     assert tracker.remove_person("nobody") is False
@@ -500,9 +411,9 @@ def test_configured_person_cannot_be_removed():
 
 
 def test_counted_as_finds_config_people_ignoring_case():
-    alex = Person("Alex", False, "02:00:00:00:00:0a", None, "person-1")
+    alex = Person("Alex", False, "02:00:00:00:00:0a", "person-1")
     tracker = presence.PresenceTracker(
-        [alex], wifi=FakeWifi(), bluetooth=FakeBluetooth(), clock=Clock(),
+        [alex], wifi=FakeWifi(), clock=Clock(),
     )
     assert tracker.person_for_mac("02:00:00:00:00:0A") == alex
     assert tracker.person_for_mac("02:00:00:00:00:0b") is None

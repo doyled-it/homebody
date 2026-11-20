@@ -19,18 +19,15 @@ node_id = 0
 # Presence and climate, read by homebody (src/homebody/config.py). Keep real
 # addresses and names out of this example file.
 #
-# [bluetooth]
-# # The hub's Bluetooth receive adapter: the one the owner's phone is paired with
-# # (the same adapter snaphouse uses for audio). Used only for the l2ping
-# # fallback. Leave it out to let l2ping pick the default adapter.
-# adapter = "<hub-bluetooth-adapter-address>"
+# Presence is Wi-Fi only. The old `[bluetooth] adapter` key and a person's
+# `bluetooth_mac` are still accepted by an old config but ignored, with a
+# warning at startup. Remove them. Each person needs a wifi_mac.
 #
 # [[person]]
 # id = "person-a"            # opaque slug used by the API and page (default person-N)
 # name = "Person A"            # a display name, not a real name, in this example
 # enabled = true               # false = configured but never probed, never counted
 # wifi_mac = "<phone-wifi-hardware-address>"   # the fixed private address for this LAN
-# bluetooth_mac = "<phone-bluetooth-address>"  # optional, for the fallback probe
 #
 # [climate]
 # comfort_f = 72              # setpoint when anyone is home

@@ -47,7 +47,6 @@ from homebody.people import (
     to_saved,
 )
 from homebody.presence import (
-    L2pingBluetoothProbe,
     NeighbourWifiProbe,
     PresenceTracker,
 )
@@ -293,7 +292,7 @@ class Daemon:
         if len(self._added) >= MAX_ADDED:
             raise PeopleError(f"Up to {MAX_ADDED} people can be added here.")
         taken = [p.name for p in self._presence.all_people()]
-        person = Person(clean_name(name, taken), True, mac, None, new_person_id())
+        person = Person(clean_name(name, taken), True, mac, new_person_id())
         self._presence.add_person(person)
         self._added.append(person)
         log.info("added person %s", person.id)
@@ -502,7 +501,6 @@ def build(config: Config, *, url: str | None = None) -> Daemon:
     presence = PresenceTracker(
         config.people,
         wifi=NeighbourWifiProbe(),
-        bluetooth=L2pingBluetoothProbe(config.bluetooth_adapter),
         clock=time.time,
         away_window=config.away_minutes * 60.0,
     )

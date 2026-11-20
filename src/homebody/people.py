@@ -75,7 +75,7 @@ def parse_saved(raw: object) -> list[Person]:
             continue
         if wifi is None:
             continue
-        people.append(Person(name.strip(), True, wifi, None, pid))
+        people.append(Person(name.strip(), True, wifi, pid))
     return people
 
 
