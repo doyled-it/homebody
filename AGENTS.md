@@ -206,7 +206,9 @@ The three meeting points with the daemon, all non-blocking:
 2. `Daemon.publish()` includes `garage.snapshot()` as the `garage` key
    (`Daemon.attach_garage`), `null` if it raises. When the door or link changes
    the service calls `Daemon.request_publish()`, which wakes `Daemon.run` to
-   publish only (no tick).
+   publish only (no tick). While the door is opening or closing it also requests a
+   publish when the position changes by a point, at most once a second
+   (`POSITION_GAP`); a state change, the landing included, always publishes.
 3. The API handler calls the command gate (`api.start(garage=service)`), under
    its own cap, `GarageService.timeout_seconds` (close wait plus note wait plus
    headroom).

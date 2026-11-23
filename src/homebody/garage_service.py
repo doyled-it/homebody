@@ -62,6 +62,10 @@ async def _pause(stop: asyncio.Event, seconds: float) -> None:
         pass
 
 
+# The least time between two status publishes for a moving door's position.
+POSITION_GAP = 1.0
+
+
 class GarageService:
     def __init__(
         self,
@@ -110,6 +114,9 @@ class GarageService:
         self._retry_at: dict[str, float] = {}
         self._door_before: str = self._model.last_known_state or "unknown"
         self._published: tuple[str, bool] | None = None
+        self._published_position: int | None = None
+        self._published_at: float | None = None
+        self._position_wait: float | None = None
         self._saved: dict[str, Any] | None = None
         self._saved_at: float | None = None
         self._save_failed_at: float | None = None
@@ -174,7 +181,10 @@ class GarageService:
                 self._wake.clear()
                 self._pass()
                 try:
-                    await asyncio.wait_for(self._wake.wait(), self._tick)
+                    wait = self._tick
+                    if self._position_wait is not None:
+                        wait = min(wait, self._position_wait)
+                    await asyncio.wait_for(self._wake.wait(), wait)
                 except TimeoutError:
                     pass
         finally:
@@ -214,11 +224,37 @@ class GarageService:
         key = (self._model.state, self._model.connected)
         if changed or key != self._published:
             self._published = key
-            self._publish()
+            self._publish(now)
+        else:
+            self._position_step(now)
         self._alerts(now)
         self._save(force=changed)
 
-    def _publish(self) -> None:
+    def _position_step(self, now: float) -> None:
+        """Publish a position change while the door travels, at most once a second.
+
+        The status file is otherwise written only when the state or link
+        changes, so the page would see the percentage jump at the end of the
+        travel. A state change (including the landing) always publishes, and
+        carries the final position. A step held back by the throttle is retried
+        when the second is up, without waiting for another push.
+        """
+        self._position_wait = None
+        if self._model.state not in ("opening", "closing"):
+            return
+        position = self._model.position_percent
+        if position is None or position == self._published_position:
+            return
+        last = self._published_at
+        since = POSITION_GAP if last is None else now - last
+        if since < POSITION_GAP:
+            self._position_wait = POSITION_GAP - since
+            return
+        self._publish(now)
+
+    def _publish(self, now: float) -> None:
+        self._published_position = self._model.position_percent
+        self._published_at = now
         try:
             self._request_publish()
         except Exception as error:  # noqa: BLE001
