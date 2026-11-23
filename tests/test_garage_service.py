@@ -445,3 +445,103 @@ def test_build_without_a_link_adapter_yields_none_not_a_crash(tmp_path, caplog):
         assert garage_service.build(config, daemon, link_factory=no_adapter) is None
     assert any("garage link" in r.getMessage() for r in caplog.records)
 
+
+
+def travel_env(tmp_path):
+    env = make(tmp_path)
+    env.link.connect()
+    env.link.push(operation="idle", position=0.0)
+    return env
+
+
+def test_position_steps_publish_while_the_door_travels(tmp_path):
+    env = travel_env(tmp_path)
+
+    async def scenario():
+        task = await start(env)
+        env.link.push(operation="opening", position=0.1)
+        await settle()
+        base = env.publishes[0]
+        for i, pos in enumerate((0.2, 0.3, 0.4), start=1):
+            env.clock.advance(1.0)
+            env.link.push(operation="opening", position=pos)
+            await until(lambda n=base + i: env.publishes[0] >= n)
+        await finish(env, task)
+        assert env.publishes[0] == base + 3
+
+    asyncio.run(scenario())
+
+
+def test_position_publishes_are_throttled_to_one_a_second(tmp_path):
+    env = travel_env(tmp_path)
+
+    async def scenario():
+        task = await start(env)
+        env.link.push(operation="opening", position=0.1)
+        await settle()
+        base = env.publishes[0]
+        for pos in (0.15, 0.2, 0.25, 0.3):
+            env.clock.advance(0.2)
+            env.link.push(operation="opening", position=pos)
+        await settle()
+        assert env.publishes[0] == base
+        env.clock.advance(1.0)
+        env.link.push(operation="opening", position=0.35)
+        await until(lambda: env.publishes[0] == base + 1)
+        await finish(env, task)
+
+    asyncio.run(scenario())
+
+
+def test_the_landing_publishes_the_final_position_even_inside_the_throttle(tmp_path):
+    env = travel_env(tmp_path)
+
+    async def scenario():
+        task = await start(env)
+        env.link.push(operation="opening", position=0.9)
+        await settle()
+        base = env.publishes[0]
+        env.clock.advance(0.1)
+        env.link.push(operation="idle", position=1.0)
+        await until(lambda: env.publishes[0] == base + 1)
+        assert env.service.snapshot()["door"]["position"] == 100
+        await finish(env, task)
+
+    asyncio.run(scenario())
+
+
+def test_an_unchanged_position_does_not_publish_again(tmp_path):
+    env = travel_env(tmp_path)
+
+    async def scenario():
+        task = await start(env)
+        env.link.push(operation="opening", position=0.5)
+        await settle()
+        base = env.publishes[0]
+        for _ in range(5):
+            env.clock.advance(2.0)
+            env.link.push(operation="opening", position=0.5)
+        await settle()
+        assert env.publishes[0] == base
+        await finish(env, task)
+
+    asyncio.run(scenario())
+
+
+def test_a_throttled_step_publishes_once_the_second_passes_without_a_new_push(tmp_path):
+    env = travel_env(tmp_path)
+
+    async def scenario():
+        task = await start(env)
+        env.link.push(operation="opening", position=0.1)
+        await settle()
+        base = env.publishes[0]
+        env.clock.advance(0.2)
+        env.link.push(operation="opening", position=0.2)
+        await settle()
+        assert env.publishes[0] == base
+        env.clock.advance(1.0)
+        await until(lambda: env.publishes[0] == base + 1)
+        await finish(env, task)
+
+    asyncio.run(scenario())
